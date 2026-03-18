@@ -1,0 +1,9 @@
+div.processor{margin-top: 20px;border:1px solid #ccc;padding:8px 20px;}
+div.success{margin-top: 20px;background-color: green;padding:8px 20px;color:#fff;}
+div.error{margin-top: 20px;background-color: red;padding:8px 20px;color: #fff;}
+div.processor img{vertical-align: middle;}
+div.success p{color:#fff;}
+div.success p i {margin-right: 5px;}
+div.error p{color:#fff;}
+div.error p i {margin-right: 5px;}
+div.error ul li { color:#fff;margin-left:26px;margin-bottom:0px;font-size: 12px;list-style-type: circle;}
