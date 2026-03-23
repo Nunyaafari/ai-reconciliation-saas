@@ -16,8 +16,11 @@ export default function MappingStep() {
     extractAndPreviewData,
     confirmMappingAndStandardize,
     loading,
+    activeJob,
+    currentUser,
     setError,
   } = useReconciliationStore();
+  const isAdmin = currentUser?.role === "admin";
 
   const [confirmed, setConfirmed] = useState(false);
   const [previewRows, setPreviewRows] = useState<Record<string, any>[]>([]);
@@ -283,7 +286,7 @@ export default function MappingStep() {
           apply: () =>
             setUserMapping((prev) => ({
               ...prev,
-              date: prev.amount,
+              date: prev.amount || prev.date,
               amount: prev.date,
             })),
         });
@@ -518,6 +521,28 @@ export default function MappingStep() {
     }
   };
 
+  if (!isAdmin) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-6">
+        <div className="max-w-lg rounded-3xl border border-amber-200 bg-white p-8 text-center shadow-sm">
+          <h2 className="text-2xl font-semibold text-slate-900">
+            Admin access required
+          </h2>
+          <p className="mt-3 text-sm leading-6 text-slate-600">
+            Mapping and standardization change the uploaded source data, so they are reserved for admins.
+            Reviewers can still open history, inspect reconciliation workspaces, approve or reject matches, and download reports.
+          </p>
+          <button
+            onClick={() => setStep("history")}
+            className="mt-6 rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
+          >
+            Open History
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   const amountHeaderLabel = isSelected(userMapping.amount)
     ? userMapping.amount
     : "Amount (Credit - Debit)";
@@ -629,9 +654,10 @@ export default function MappingStep() {
                       </option>
                     ))}
                   </select>
-                  {(["date", "amount", "debit", "credit"] as const).includes(
-                    key
-                  ) &&
+                  {(key === "date" ||
+                    key === "amount" ||
+                    key === "debit" ||
+                    key === "credit") &&
                     columnSampleValidation[key]?.message && (
                       <p
                         className={`mt-1 text-xs ${
@@ -791,8 +817,14 @@ export default function MappingStep() {
               <div className="text-center py-8">
                 <Loader className="w-8 h-8 text-slate-400 mx-auto mb-2 animate-spin" />
                 <p className="text-sm text-slate-600">
-                  Extracting data...
+                  {activeJob?.message || "Extracting data..."}
                 </p>
+                {typeof activeJob?.progressPercent === "number" &&
+                activeJob.progressPercent > 0 ? (
+                  <p className="mt-2 text-xs text-slate-500">
+                    {activeJob.progressPercent}% complete
+                  </p>
+                ) : null}
               </div>
             ) : (
               <div className="overflow-x-auto">

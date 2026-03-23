@@ -36,7 +36,9 @@ class StandardizationService:
 
         for idx, raw_tx in enumerate(raw_transactions):
             try:
-                amount_value = self._resolve_amount(raw_tx, column_mapping, source)
+                amount_value, direction = self._resolve_amount_and_direction(
+                    raw_tx, column_mapping, source
+                )
                 standardized_tx = {
                     "trans_date": self._standardize_date(
                         raw_tx.get(column_mapping.date, "")
@@ -48,6 +50,9 @@ class StandardizationService:
                         raw_tx.get(column_mapping.reference)
                     ),
                     "amount": amount_value,
+                    "direction": direction,
+                    "debit_amount": abs(amount_value) if direction == "debit" else Decimal("0"),
+                    "credit_amount": abs(amount_value) if direction == "credit" else Decimal("0"),
                 }
 
                 # Validate required fields

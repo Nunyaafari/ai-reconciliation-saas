@@ -1,8 +1,17 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    status,
+    UploadFile,
+    File,
+    Form,
+)
 from sqlalchemy.orm import Session
 from uuid import UUID
 import logging
 from datetime import datetime
+import hashlib
 import json
 
 from app.database import get_db
@@ -11,41 +20,98 @@ from app.database.models import (
     UploadSession,
     BankTransaction,
     BookTransaction,
+    MatchGroup,
+    User,
 )
+from app.dependencies.auth import ensure_org_access, get_admin_user, get_current_user
+from app.observability import record_job_event
 from app.schemas import (
     UploadSessionCreate,
     UploadSessionResponse,
     DataExtractionResponse,
+    ProcessingJobResponse,
     ColumnMapping,
     BankTransactionResponse,
     BookTransactionResponse,
 )
 from app.services.extraction_service import ExtractionService
+from app.services.audit_service import audit_service
+from app.services.file_storage_service import file_storage_service
+from app.services.job_service import job_service, queue_extraction_job
+from app.services.processing_service import ProcessingService
 from app.services.standardization_service import StandardizationService
 
 router = APIRouter(prefix="/api/uploads", tags=["Uploads"])
 logger = logging.getLogger(__name__)
 
 extraction_service = ExtractionService()
+processing_service = ProcessingService()
 standardization_service = StandardizationService()
 
 
 # ===== HELPER FUNCTIONS =====
 
-def get_org_or_404(org_id: UUID, db: Session) -> Organization:
+def get_org_or_404(org_id: UUID, db: Session, current_user: User) -> Organization:
     """Get organization or raise 404."""
+    ensure_org_access(org_id, current_user)
     org = db.query(Organization).filter(Organization.id == org_id).first()
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
     return org
 
 
-def get_upload_session_or_404(session_id: UUID, db: Session) -> UploadSession:
+def get_upload_session_or_404(
+    session_id: UUID,
+    db: Session,
+    current_user: User,
+) -> UploadSession:
     """Get upload session or raise 404."""
-    session = db.query(UploadSession).filter(UploadSession.id == session_id).first()
+    session = (
+        db.query(UploadSession)
+        .filter(
+            UploadSession.id == session_id,
+            UploadSession.org_id == current_user.org_id,
+        )
+        .first()
+    )
     if not session:
         raise HTTPException(status_code=404, detail="Upload session not found")
     return session
+
+
+def clear_existing_session_transactions(session: UploadSession, db: Session) -> None:
+    """Remove prior transactions and stale match groups before remapping a session."""
+    transaction_model = (
+        BankTransaction if session.upload_source == "bank" else BookTransaction
+    )
+    existing_transactions = db.query(transaction_model).filter(
+        transaction_model.upload_session_id == session.id
+    ).all()
+
+    affected_match_group_ids = {
+        tx.match_group_id for tx in existing_transactions if tx.match_group_id is not None
+    }
+
+    if affected_match_group_ids:
+        db.query(BankTransaction).filter(
+            BankTransaction.match_group_id.in_(affected_match_group_ids)
+        ).update(
+            {"match_group_id": None, "status": "unreconciled"},
+            synchronize_session=False,
+        )
+        db.query(BookTransaction).filter(
+            BookTransaction.match_group_id.in_(affected_match_group_ids)
+        ).update(
+            {"match_group_id": None, "status": "unreconciled"},
+            synchronize_session=False,
+        )
+        db.query(MatchGroup).filter(
+            MatchGroup.id.in_(affected_match_group_ids)
+        ).delete(synchronize_session=False)
+
+    db.query(transaction_model).filter(
+        transaction_model.upload_session_id == session.id
+    ).delete(synchronize_session=False)
 
 
 # ===== ENDPOINTS =====
@@ -56,6 +122,7 @@ async def create_upload_session(
     file: UploadFile = File(...),
     source: str = "bank",  # bank or book
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
 ):
     """
     Create an upload session and store file metadata.
@@ -65,7 +132,7 @@ async def create_upload_session(
     - **source**: 'bank' or 'book'
     """
     # Verify org exists
-    org = get_org_or_404(org_id, db)
+    org = get_org_or_404(org_id, db, current_user)
 
     # Validate file type
     allowed_types = {"pdf", "xlsx", "xls", "csv"}
@@ -77,24 +144,91 @@ async def create_upload_session(
     file_type_map = {"xls": "xlsx", "xlsx": "xlsx", "csv": "csv", "pdf": "pdf"}
     file_type = file_type_map.get(file_ext, file_ext)
 
+    file_bytes = await file.read()
+    file_hash = hashlib.sha256(file_bytes).hexdigest()
+    await file.seek(0)
+
+    existing_session = db.query(UploadSession).filter(
+        UploadSession.org_id == org_id,
+        UploadSession.upload_source == source,
+        UploadSession.file_hash == file_hash,
+    ).order_by(UploadSession.created_at.desc()).first()
+
+    if existing_session:
+        if existing_session.status == "failed":
+            existing_session.status = "uploaded"
+            existing_session.error_message = None
+        existing_session.file_name = file.filename
+        existing_session.file_size = len(file_bytes)
+        existing_session.file_type = file_type
+        if not file_storage_service.exists(existing_session.stored_file_path):
+            existing_session.stored_file_path = file_storage_service.save_upload(
+                org_id=org_id,
+                session_id=existing_session.id,
+                file_ext=file_ext,
+                content=file_bytes,
+            )
+        db.commit()
+        db.refresh(existing_session)
+        logger.info(
+            "Reused existing upload session %s for org %s (%s)",
+            existing_session.id,
+            org_id,
+            source,
+        )
+        audit_service.log(
+            db=db,
+            org_id=org.id,
+            actor_user_id=current_user.id,
+            action="upload.session.reused",
+            entity_type="upload_session",
+            entity_id=str(existing_session.id),
+            metadata={
+                "source": source,
+                "file_name": file.filename,
+            },
+        )
+        return UploadSessionResponse.model_validate(existing_session)
+
     # Create upload session
     upload_session = UploadSession(
         org_id=org_id,
         file_name=file.filename,
-        file_size=len(await file.read()),
+        file_hash=file_hash,
+        file_size=len(file_bytes),
+        stored_file_path="",
         file_type=file_type,
         upload_source=source,
         status="uploaded",
     )
-    await file.seek(0)  # Reset file pointer
 
     db.add(upload_session)
+    db.flush()
+    upload_session.stored_file_path = file_storage_service.save_upload(
+        org_id=org_id,
+        session_id=upload_session.id,
+        file_ext=file_ext,
+        content=file_bytes,
+    )
     db.commit()
     db.refresh(upload_session)
 
     logger.info(f"Created upload session {upload_session.id} for org {org_id}")
+    audit_service.log(
+        db=db,
+        org_id=org.id,
+        actor_user_id=current_user.id,
+        action="upload.session.created",
+        entity_type="upload_session",
+        entity_id=str(upload_session.id),
+        metadata={
+            "source": source,
+            "file_name": file.filename,
+            "file_type": file_type,
+        },
+    )
 
-    return UploadSessionResponse.from_orm(upload_session)
+    return UploadSessionResponse.model_validate(upload_session)
 
 
 @router.post("/extract/{session_id}", response_model=DataExtractionResponse)
@@ -102,6 +236,7 @@ async def extract_data(
     session_id: UUID,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
 ):
     """
     Extract raw data from uploaded file (PDF, XLSX, CSV).
@@ -114,55 +249,74 @@ async def extract_data(
     4. Return preview for user confirmation
     """
     # Verify session exists
-    session = get_upload_session_or_404(session_id, db)
-
-    # Update status
-    session.status = "extracting"
-    db.commit()
+    session = get_upload_session_or_404(session_id, db, current_user)
 
     try:
         # Read file content
         file_content = await file.read()
 
-        # Call extraction service (Azure AI or local parser)
-        extraction_result = extraction_service.extract(
+        return processing_service.build_extraction_preview(
+            session=session,
             file_content=file_content,
-            file_type=session.file_type,
-            org_id=session.org_id,
+            db=db,
         )
-
-        if not extraction_result.get("raw_data") and not extraction_result.get("column_headers"):
-            raise ValueError(
-                "No rows detected. Please upload a clearer file or use CSV/XLSX."
-            )
-
-        # AI guess column mapping
-        ai_mapping = extraction_service.guess_column_mapping(
-            raw_data=extraction_result["raw_data"],
-            org_id=session.org_id,
-            column_headers=extraction_result.get("column_headers", []),
-        )
-
-        # Update session
-        session.status = "mapping"
-        session.rows_extracted = len(extraction_result["raw_data"])
-        db.commit()
-
-        return DataExtractionResponse(
-            extraction_id=str(session_id),
-            raw_data=extraction_result["raw_data"][:5],  # First 5 rows
-            column_headers=extraction_result["column_headers"],
-            ai_guess_mapping=ai_mapping,
-            ai_confidence=extraction_result.get("confidence", 75),
-            extraction_method=extraction_result.get("method", "unknown"),
-        )
-
     except Exception as e:
-        session.status = "failed"
-        session.error_message = str(e)
-        db.commit()
         logger.error(f"Extraction failed for session {session_id}: {str(e)}")
         raise HTTPException(status_code=400, detail=f"Extraction failed: {str(e)}")
+
+
+@router.post("/extract-async/{session_id}", response_model=ProcessingJobResponse)
+async def extract_data_async(
+    session_id: UUID,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Queue extraction work and return a polling job handle."""
+    session = get_upload_session_or_404(session_id, db, current_user)
+    if not file_storage_service.exists(session.stored_file_path):
+        file_content = await file.read()
+        file_ext = (file.filename or session.file_name).split(".")[-1].lower()
+        session.stored_file_path = file_storage_service.save_upload(
+            org_id=session.org_id,
+            session_id=session.id,
+            file_ext=file_ext,
+            content=file_content,
+        )
+        db.commit()
+        db.refresh(session)
+
+    job, created = job_service.create_extraction_job(
+        upload_session_id=session.id,
+        org_id=session.org_id,
+        actor_user_id=current_user.id,
+        job_payload={
+            "upload_session_id": str(session.id),
+            "file_path": session.stored_file_path,
+        },
+        db=db,
+    )
+
+    if created:
+        queue_extraction_job(job.id, session.id, session.stored_file_path or "")
+        record_job_event("extraction", "enqueued")
+        logger.info("Queued extraction job %s for session %s", job.id, session.id)
+        audit_service.log(
+            db=db,
+            org_id=session.org_id,
+            actor_user_id=current_user.id,
+            action="job.enqueued",
+            entity_type="processing_job",
+            entity_id=str(job.id),
+            metadata={
+                "job_type": "extraction",
+                "upload_session_id": str(session.id),
+            },
+        )
+    else:
+        logger.info("Reusing active extraction job %s for session %s", job.id, session.id)
+
+    return job_service.serialize_job(job)
 
 
 @router.post("/confirm-mapping/{session_id}", response_model=dict)
@@ -172,6 +326,7 @@ async def confirm_mapping(
     save_as_fingerprint: bool = Form(True),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
 ):
     """
     User confirms column mapping and uploads full file data.
@@ -180,7 +335,7 @@ async def confirm_mapping(
     Returns: Count of standardized transactions
     """
     # Verify session exists
-    session = get_upload_session_or_404(session_id, db)
+    session = get_upload_session_or_404(session_id, db, current_user)
 
     try:
         # Parse column mapping JSON from form field
@@ -220,6 +375,8 @@ async def confirm_mapping(
             column_mapping=mapping,
             source=session.upload_source,
         )
+
+        clear_existing_session_transactions(session, db)
 
         # Store standardized transactions in DB
         transaction_count = 0
@@ -261,11 +418,24 @@ async def confirm_mapping(
 
         # Update session
         session.status = "complete"
+        session.error_message = None
         session.rows_standardized = transaction_count
         session.completed_at = datetime.utcnow()
         db.commit()
 
         logger.info(f"Standardized {transaction_count} transactions for session {session_id}")
+        audit_service.log(
+            db=db,
+            org_id=session.org_id,
+            actor_user_id=current_user.id,
+            action="upload.mapping.confirmed",
+            entity_type="upload_session",
+            entity_id=str(session_id),
+            metadata={
+                "source": session.upload_source,
+                "standardized_count": transaction_count,
+            },
+        )
 
         return {
             "status": "success",
@@ -285,37 +455,40 @@ async def confirm_mapping(
 async def get_upload_session(
     session_id: UUID,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Get upload session details."""
-    session = get_upload_session_or_404(session_id, db)
-    return UploadSessionResponse.from_orm(session)
+    session = get_upload_session_or_404(session_id, db, current_user)
+    return UploadSessionResponse.model_validate(session)
 
 
 @router.get("/transactions/{session_id}/bank", response_model=list[BankTransactionResponse])
 async def get_bank_transactions(
     session_id: UUID,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Get all bank transactions from an upload session."""
-    session = get_upload_session_or_404(session_id, db)
+    session = get_upload_session_or_404(session_id, db, current_user)
 
     transactions = db.query(BankTransaction).filter(
         BankTransaction.upload_session_id == session_id
     ).all()
 
-    return [BankTransactionResponse.from_orm(tx) for tx in transactions]
+    return [BankTransactionResponse.model_validate(tx) for tx in transactions]
 
 
 @router.get("/transactions/{session_id}/book", response_model=list[BookTransactionResponse])
 async def get_book_transactions(
     session_id: UUID,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Get all book transactions from an upload session."""
-    session = get_upload_session_or_404(session_id, db)
+    session = get_upload_session_or_404(session_id, db, current_user)
 
     transactions = db.query(BookTransaction).filter(
         BookTransaction.upload_session_id == session_id
     ).all()
 
-    return [BookTransactionResponse.from_orm(tx) for tx in transactions]
+    return [BookTransactionResponse.model_validate(tx) for tx in transactions]

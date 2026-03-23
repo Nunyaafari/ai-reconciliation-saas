@@ -1,29 +1,34 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    postgresql-client \
-    poppler-utils \
-    tesseract-ocr \
     curl \
+    poppler-utils \
+    postgresql-client \
+    tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy app
 COPY . .
 
-# Create non-root user
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+
 USER appuser
 
-# Health check
+EXPOSE 8000
+
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=5 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Run app
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+ENV APP_ENV=production \
+    API_HOST=0.0.0.0 \
+    API_PORT=8000
+
+CMD ["sh", "/app/scripts/start.sh"]

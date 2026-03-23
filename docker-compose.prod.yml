@@ -1,0 +1,89 @@
+services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      APP_ENV: production
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      UPLOAD_STORAGE_PATH: ${UPLOAD_STORAGE_PATH:-/app/storage/uploads}
+      FRONTEND_APP_URL: ${FRONTEND_APP_URL}
+      DEBUG: "False"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_JSON: ${LOG_JSON:-true}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      AUTH_BOOTSTRAP_ENABLED: ${AUTH_BOOTSTRAP_ENABLED:-false}
+      JOB_MAX_RETRIES: ${JOB_MAX_RETRIES:-3}
+      PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-AI Reconciliation SaaS}
+      SMTP_USE_STARTTLS: ${SMTP_USE_STARTTLS:-true}
+      SMTP_USE_SSL: ${SMTP_USE_SSL:-false}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AZURE_AI_KEY: ${AZURE_AI_KEY:-}
+      AZURE_AI_ENDPOINT: ${AZURE_AI_ENDPOINT:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://your-frontend.example.com}
+    volumes:
+      - upload_storage:/app/storage/uploads
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      UPLOAD_STORAGE_PATH: ${UPLOAD_STORAGE_PATH:-/app/storage/uploads}
+      FRONTEND_APP_URL: ${FRONTEND_APP_URL}
+      DEBUG: "False"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_JSON: ${LOG_JSON:-true}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      AUTH_BOOTSTRAP_ENABLED: ${AUTH_BOOTSTRAP_ENABLED:-false}
+      JOB_MAX_RETRIES: ${JOB_MAX_RETRIES:-3}
+      PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AZURE_AI_KEY: ${AZURE_AI_KEY:-}
+      AZURE_AI_ENDPOINT: ${AZURE_AI_ENDPOINT:-}
+    volumes:
+      - upload_storage:/app/storage/uploads
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+    volumes: []
+    restart: unless-stopped
+
+volumes:
+  upload_storage:

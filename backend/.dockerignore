@@ -1,0 +1,12 @@
+__pycache__
+.pytest_cache
+.venv
+alembic/versions/__pycache__
+app/__pycache__
+app/database/__pycache__
+app/routes/__pycache__
+app/services/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.DS_Store

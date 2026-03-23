@@ -19,6 +19,7 @@ interface MatchReviewPanelProps {
   suggestions: Suggestion[];
   onMatch: (bookTxId: string) => void;
   onClose: () => void;
+  canMatch?: boolean;
 }
 
 export default function MatchReviewPanel({
@@ -26,7 +27,18 @@ export default function MatchReviewPanel({
   suggestions,
   onMatch,
   onClose,
+  canMatch = true,
 }: MatchReviewPanelProps) {
+  const formatTransactionAmount = (transaction: Transaction) => {
+    const direction = transaction.direction || (transaction.amount >= 0 ? "credit" : "debit");
+    const magnitude =
+      direction === "debit"
+        ? transaction.debitAmount ?? Math.abs(transaction.amount)
+        : transaction.creditAmount ?? Math.abs(transaction.amount);
+
+    return `${direction === "debit" ? "Debit" : "Credit"} $${magnitude.toFixed(2)}`;
+  };
+
   const getConfidenceColor = (confidence: number) => {
     if (confidence >= 90) return "text-green-600 bg-green-50";
     if (confidence >= 70) return "text-yellow-600 bg-yellow-50";
@@ -67,7 +79,7 @@ export default function MatchReviewPanel({
             <div className="flex justify-between items-center">
               <span className="text-sm text-slate-600">Amount:</span>
               <span className="font-mono font-bold text-slate-900">
-                ${bankTx.amount.toFixed(2)}
+                {formatTransactionAmount(bankTx)}
               </span>
             </div>
             <div className="flex justify-between items-center">
@@ -127,7 +139,7 @@ export default function MatchReviewPanel({
                               : "text-red-600"
                           }`}
                         >
-                          ${suggestion.transaction.amount.toFixed(2)}
+                          {formatTransactionAmount(suggestion.transaction)}
                         </span>
                       </div>
 
@@ -209,10 +221,15 @@ export default function MatchReviewPanel({
                     {/* Match Button */}
                     <button
                       onClick={() => onMatch(suggestion.transaction.id)}
-                      className="w-full px-3 py-2 bg-blue-600 text-white text-sm rounded-lg font-medium hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+                      disabled={!canMatch}
+                      className={`w-full px-3 py-2 text-sm rounded-lg font-medium transition-colors flex items-center justify-center gap-2 ${
+                        canMatch
+                          ? "bg-blue-600 text-white hover:bg-blue-700"
+                          : "cursor-not-allowed bg-slate-200 text-slate-500"
+                      }`}
                     >
                       <Check className="w-4 h-4" />
-                      Confirm Match
+                      {canMatch ? "Confirm Match" : "Admin Only"}
                     </button>
                   </div>
 

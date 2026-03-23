@@ -1,182 +1,181 @@
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime
+import logging
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 from uuid import UUID
-import logging
 
 from app.database import get_db
 from app.database.models import (
-    UploadSession,
     BankTransaction,
     BookTransaction,
+    UploadSession,
     MatchGroup,
     Organization,
+    ReconciliationSession,
+    User,
 )
+from app.dependencies.auth import ensure_org_access, get_admin_user, get_current_user
+from app.observability import record_job_event
 from app.schemas import (
+    ProcessingJobResponse,
     ReconciliationRequest,
     ReconciliationStatusResponse,
     MatchGroupCreate,
     MatchGroupResponse,
     MatchGroupApprove,
-    UnmatchedTransactionWithSuggestions,
-    MatchSuggestion,
-    BankTransactionResponse,
+    ReconciliationSessionResponse,
 )
-from app.services.matching_service import MatchingService
+from app.services.job_service import job_service, queue_reconciliation_job
+from app.services.audit_service import audit_service
+from app.services.processing_service import ProcessingService
+from app.services.reconciliation_service import ReconciliationService
 
 router = APIRouter(prefix="/api/reconciliation", tags=["Reconciliation"])
 logger = logging.getLogger(__name__)
 
-matching_service = MatchingService()
+processing_service = ProcessingService()
+reconciliation_service = ReconciliationService()
 
 
-# ===== HELPER FUNCTIONS =====
-
-def get_org_or_404(org_id: UUID, db: Session) -> Organization:
+def get_org_or_404(org_id: UUID, db: Session, current_user: User) -> Organization:
     """Get organization or raise 404."""
+    ensure_org_access(org_id, current_user)
     org = db.query(Organization).filter(Organization.id == org_id).first()
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
     return org
 
 
-def get_upload_session_or_404(session_id: UUID, db: Session) -> UploadSession:
+def get_upload_session_or_404(
+    session_id: UUID,
+    db: Session,
+    current_user: User,
+) -> UploadSession:
     """Get upload session or raise 404."""
-    session = db.query(UploadSession).filter(UploadSession.id == session_id).first()
+    session = (
+        db.query(UploadSession)
+        .filter(
+            UploadSession.id == session_id,
+            UploadSession.org_id == current_user.org_id,
+        )
+        .first()
+    )
     if not session:
         raise HTTPException(status_code=404, detail="Upload session not found")
     return session
 
 
-# ===== ENDPOINTS =====
+def get_reconciliation_session_or_404(
+    session_id: UUID,
+    db: Session,
+    current_user: User,
+) -> ReconciliationSession:
+    reconciliation_session = (
+        db.query(ReconciliationSession)
+        .filter(
+            ReconciliationSession.id == session_id,
+            ReconciliationSession.org_id == current_user.org_id,
+        )
+        .first()
+    )
+    if not reconciliation_session:
+        raise HTTPException(status_code=404, detail="Reconciliation session not found")
+    return reconciliation_session
+
+
+def get_match_group_or_404(
+    match_id: UUID,
+    db: Session,
+    current_user: User,
+) -> MatchGroup:
+    match_group = (
+        db.query(MatchGroup)
+        .filter(
+            MatchGroup.id == match_id,
+            MatchGroup.org_id == current_user.org_id,
+        )
+        .first()
+    )
+    if not match_group:
+        raise HTTPException(status_code=404, detail="Match group not found")
+    return match_group
+
 
 @router.post("/start/{org_id}", response_model=ReconciliationStatusResponse)
 async def start_reconciliation(
     org_id: UUID,
     request: ReconciliationRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
 ):
     """
     Start reconciliation matching between bank and book transactions.
 
-    1. Run matching algorithm on all transactions
-    2. Calculate confidence scores
-    3. Return status with unmatched items and suggestions
+    The matching engine uses signed amounts that already encode the
+    bank-vs-cash-book debit/credit inversion:
+    - bank credit == positive, bank debit == negative
+    - cash-book debit == positive, cash-book credit == negative
     """
-    # Verify org and sessions exist
-    org = get_org_or_404(org_id, db)
-    bank_session = get_upload_session_or_404(request.bank_upload_session_id, db)
-    book_session = get_upload_session_or_404(request.book_upload_session_id, db)
+    get_org_or_404(org_id, db, current_user)
+    get_upload_session_or_404(request.bank_upload_session_id, db, current_user)
+    get_upload_session_or_404(request.book_upload_session_id, db, current_user)
 
     try:
-        # Get all transactions
-        bank_transactions = db.query(BankTransaction).filter(
-            BankTransaction.upload_session_id == request.bank_upload_session_id,
-            BankTransaction.status == "unreconciled",
-        ).all()
-
-        book_transactions = db.query(BookTransaction).filter(
-            BookTransaction.upload_session_id == request.book_upload_session_id,
-            BookTransaction.status == "unreconciled",
-        ).all()
-
-        # Run matching algorithm
-        matches = matching_service.match_transactions(
-            bank_transactions=bank_transactions,
-            book_transactions=book_transactions,
+        return processing_service.run_reconciliation(
             org_id=org_id,
+            bank_session_id=request.bank_upload_session_id,
+            book_session_id=request.book_upload_session_id,
+            db=db,
         )
+    except Exception as exc:
+        logger.error("Reconciliation failed for org %s: %s", org_id, exc)
+        raise HTTPException(status_code=400, detail=f"Reconciliation failed: {exc}")
 
-        # Create match groups and update transaction status
-        for match in matches:
-            match_group = MatchGroup(
-                org_id=org_id,
-                match_type=match["type"],
-                total_bank_amount=match["total_bank_amount"],
-                total_book_amount=match["total_book_amount"],
-                variance=match["variance"],
-                confidence_score=match["confidence"],
-                status="pending",
-            )
-            db.add(match_group)
-            db.flush()  # Get the new ID
 
-            # Link transactions to match group
-            for bank_tx_id in match["bank_transaction_ids"]:
-                tx = db.query(BankTransaction).get(bank_tx_id)
-                tx.match_group_id = match_group.id
-                tx.status = "pending"
+@router.post("/start-async/{org_id}", response_model=ProcessingJobResponse)
+async def start_reconciliation_async(
+    org_id: UUID,
+    request: ReconciliationRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Queue reconciliation work and return a polling job handle."""
+    get_org_or_404(org_id, db, current_user)
+    get_upload_session_or_404(request.bank_upload_session_id, db, current_user)
+    get_upload_session_or_404(request.book_upload_session_id, db, current_user)
 
-            for book_tx_id in match["book_transaction_ids"]:
-                tx = db.query(BookTransaction).get(book_tx_id)
-                tx.match_group_id = match_group.id
-                tx.status = "pending"
-
-        db.commit()
-
-        # Get updated statuses
-        bank_matched = db.query(BankTransaction).filter(
-            BankTransaction.upload_session_id == request.bank_upload_session_id,
-            BankTransaction.status != "unreconciled",
-        ).count()
-
-        book_matched = db.query(BookTransaction).filter(
-            BookTransaction.upload_session_id == request.book_upload_session_id,
-            BookTransaction.status != "unreconciled",
-        ).count()
-
-        total_bank = len(bank_transactions)
-        total_book = len(book_transactions)
-
-        # Get unmatched transactions with suggestions
-        unmatched_bank = db.query(BankTransaction).filter(
-            BankTransaction.upload_session_id == request.bank_upload_session_id,
-            BankTransaction.status == "unreconciled",
-        ).all()
-
-        unmatched_suggestions = []
-        for bank_tx in unmatched_bank:
-            suggestions = matching_service.get_suggestions_for_transaction(
-                bank_tx,
-                book_transactions,
-            )
-            unmatched_suggestions.append(
-                UnmatchedTransactionWithSuggestions(
-                    bank_transaction_id=bank_tx.id,
-                    bank_transaction=BankTransactionResponse.from_orm(bank_tx),
-                    suggestions=[
-                        MatchSuggestion(
-                            book_transaction_id=s["book_tx_id"],
-                            confidence_score=s["confidence"],
-                            match_signals=s["signals"],
-                            explanation=s["explanation"],
-                        )
-                        for s in suggestions
-                    ],
-                )
-            )
-
-        # Get all match groups
-        match_groups = db.query(MatchGroup).filter(
-            MatchGroup.org_id == org_id
-        ).all()
-
-        progress = 0
-        if total_bank + total_book > 0:
-            progress = int(((bank_matched + book_matched) / (total_bank + total_book)) * 100)
-
-        return ReconciliationStatusResponse(
-            total_bank_transactions=total_bank,
-            matched_bank_transactions=bank_matched,
-            total_book_transactions=total_book,
-            matched_book_transactions=book_matched,
-            unmatched_suggestions=unmatched_suggestions,
-            match_groups=[MatchGroupResponse.from_orm(mg) for mg in match_groups],
-            progress_percent=progress,
-        )
-
-    except Exception as e:
-        logger.error(f"Reconciliation failed for org {org_id}: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Reconciliation failed: {str(e)}")
+    job = job_service.create_reconciliation_job(
+        org_id=org_id,
+        actor_user_id=current_user.id,
+        job_payload={
+            "org_id": str(org_id),
+            "bank_session_id": str(request.bank_upload_session_id),
+            "book_session_id": str(request.book_upload_session_id),
+        },
+        db=db,
+    )
+    queue_reconciliation_job(
+        job.id,
+        org_id,
+        request.bank_upload_session_id,
+        request.book_upload_session_id,
+    )
+    record_job_event("reconciliation", "enqueued")
+    logger.info("Queued reconciliation job %s for org %s", job.id, org_id)
+    audit_service.log(
+        db=db,
+        org_id=current_user.org_id,
+        actor_user_id=current_user.id,
+        action="job.enqueued",
+        entity_type="processing_job",
+        entity_id=str(job.id),
+        metadata={
+            "job_type": "reconciliation",
+            "bank_session_id": str(request.bank_upload_session_id),
+            "book_session_id": str(request.book_upload_session_id),
+        },
+    )
+    return job_service.serialize_job(job)
 
 
 @router.post("/match/{org_id}", response_model=MatchGroupResponse)
@@ -184,35 +183,29 @@ async def create_manual_match(
     org_id: UUID,
     match_request: MatchGroupCreate,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
 ):
-    """
-    Manually create a match between transactions.
-    Called when user approves an AI suggestion or creates manual link.
-    """
-    org = get_org_or_404(org_id, db)
+    """Manually create a match between transactions."""
+    get_org_or_404(org_id, db, current_user)
 
     try:
-        # Get transactions
         bank_txs = db.query(BankTransaction).filter(
-            BankTransaction.id.in_(match_request.bank_transaction_ids)
+            BankTransaction.id.in_(match_request.bank_transaction_ids),
+            BankTransaction.org_id == current_user.org_id,
         ).all()
-
         book_txs = db.query(BookTransaction).filter(
-            BookTransaction.id.in_(match_request.book_transaction_ids)
+            BookTransaction.id.in_(match_request.book_transaction_ids),
+            BookTransaction.org_id == current_user.org_id,
         ).all()
 
         if not bank_txs or not book_txs:
             raise HTTPException(status_code=400, detail="Invalid transaction IDs")
 
-        # Calculate totals and variance
         total_bank = sum(float(tx.amount) for tx in bank_txs)
         total_book = sum(float(tx.amount) for tx in book_txs)
         variance = abs(total_bank - total_book)
-
-        # Determine match type
         match_type = f"{len(bank_txs)}:{len(book_txs)}"
 
-        # Create match group
         match_group = MatchGroup(
             org_id=org_id,
             match_type=match_type,
@@ -226,7 +219,6 @@ async def create_manual_match(
         db.add(match_group)
         db.flush()
 
-        # Link transactions
         for tx in bank_txs:
             tx.match_group_id = match_group.id
             tx.status = "pending"
@@ -238,13 +230,26 @@ async def create_manual_match(
         db.commit()
         db.refresh(match_group)
 
-        logger.info(f"Created manual match {match_group.id} for org {org_id}")
+        logger.info("Created manual match %s for org %s", match_group.id, org_id)
+        audit_service.log(
+            db=db,
+            org_id=current_user.org_id,
+            actor_user_id=current_user.id,
+            action="match.created",
+            entity_type="match_group",
+            entity_id=str(match_group.id),
+            metadata={
+                "match_type": match_type,
+                "confidence_score": match_request.confidence_score,
+            },
+        )
+        return reconciliation_service.serialize_match_group(match_group)
 
-        return MatchGroupResponse.from_orm(match_group)
-
-    except Exception as e:
-        logger.error(f"Manual match creation failed: {str(e)}")
-        raise HTTPException(status_code=400, detail=f"Match creation failed: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Manual match creation failed: %s", exc)
+        raise HTTPException(status_code=400, detail=f"Match creation failed: {exc}")
 
 
 @router.post("/match/{match_id}/approve", response_model=MatchGroupResponse)
@@ -252,102 +257,224 @@ async def approve_match(
     match_id: UUID,
     approve_request: MatchGroupApprove,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Approve a pending match."""
-    match_group = db.query(MatchGroup).filter(MatchGroup.id == match_id).first()
+    match_group = get_match_group_or_404(match_id, db, current_user)
 
-    if not match_group:
-        raise HTTPException(status_code=404, detail="Match group not found")
-
-    from datetime import datetime
     match_group.status = "approved"
     match_group.approved_at = datetime.utcnow()
+    match_group.approved_by_user_id = current_user.id
     if approve_request.notes:
         match_group.notes = approve_request.notes
 
-    # Update linked transactions
     db.query(BankTransaction).filter(
-        BankTransaction.match_group_id == match_id
+        BankTransaction.match_group_id == match_id,
+        BankTransaction.org_id == current_user.org_id,
     ).update({"status": "matched"})
-
     db.query(BookTransaction).filter(
-        BookTransaction.match_group_id == match_id
+        BookTransaction.match_group_id == match_id,
+        BookTransaction.org_id == current_user.org_id,
     ).update({"status": "matched"})
 
     db.commit()
     db.refresh(match_group)
-
-    logger.info(f"Approved match {match_id}")
-
-    return MatchGroupResponse.from_orm(match_group)
+    logger.info("Approved match %s", match_id)
+    audit_service.log(
+        db=db,
+        org_id=current_user.org_id,
+        actor_user_id=current_user.id,
+        action="match.approved",
+        entity_type="match_group",
+        entity_id=str(match_id),
+        metadata={"notes": approve_request.notes or ""},
+    )
+    return reconciliation_service.serialize_match_group(match_group)
 
 
 @router.delete("/match/{match_id}")
 async def reject_match(
     match_id: UUID,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Reject/delete a match."""
-    match_group = db.query(MatchGroup).filter(MatchGroup.id == match_id).first()
+    match_group = get_match_group_or_404(match_id, db, current_user)
 
-    if not match_group:
-        raise HTTPException(status_code=404, detail="Match group not found")
-
-    # Unlink transactions
     db.query(BankTransaction).filter(
-        BankTransaction.match_group_id == match_id
+        BankTransaction.match_group_id == match_id,
+        BankTransaction.org_id == current_user.org_id,
     ).update({"match_group_id": None, "status": "unreconciled"})
-
     db.query(BookTransaction).filter(
-        BookTransaction.match_group_id == match_id
+        BookTransaction.match_group_id == match_id,
+        BookTransaction.org_id == current_user.org_id,
     ).update({"match_group_id": None, "status": "unreconciled"})
 
     db.delete(match_group)
     db.commit()
-
-    logger.info(f"Rejected match {match_id}")
-
+    logger.info("Rejected match %s", match_id)
+    audit_service.log(
+        db=db,
+        org_id=current_user.org_id,
+        actor_user_id=current_user.id,
+        action="match.rejected",
+        entity_type="match_group",
+        entity_id=str(match_id),
+    )
     return {"status": "success", "match_id": str(match_id)}
 
 
-@router.get("/status/{org_id}/{bank_session_id}/{book_session_id}", response_model=ReconciliationStatusResponse)
+@router.get(
+    "/status/{org_id}/{bank_session_id}/{book_session_id}",
+    response_model=ReconciliationStatusResponse,
+)
 async def get_reconciliation_status(
     org_id: UUID,
     bank_session_id: UUID,
     book_session_id: UUID,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Get current reconciliation status without re-running the matching algorithm."""
-    org = get_org_or_404(org_id, db)
+    get_org_or_404(org_id, db, current_user)
+    get_upload_session_or_404(bank_session_id, db, current_user)
+    get_upload_session_or_404(book_session_id, db, current_user)
+    return processing_service.build_status_response(
+        org_id=org_id,
+        bank_session_id=bank_session_id,
+        book_session_id=book_session_id,
+        db=db,
+    )
 
-    bank_transactions = db.query(BankTransaction).filter(
-        BankTransaction.upload_session_id == bank_session_id
-    ).all()
 
-    book_transactions = db.query(BookTransaction).filter(
-        BookTransaction.upload_session_id == book_session_id
-    ).all()
+@router.get(
+    "/sessions/{org_id}",
+    response_model=list[ReconciliationSessionResponse],
+)
+async def list_reconciliation_sessions(
+    org_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List monthly reconciliation sessions for an organization."""
+    get_org_or_404(org_id, db, current_user)
+    sessions = (
+        db.query(ReconciliationSession)
+        .filter(ReconciliationSession.org_id == current_user.org_id)
+        .order_by(ReconciliationSession.period_month.desc())
+        .all()
+    )
+    return [
+        ReconciliationSessionResponse.model_validate(reconciliation_session)
+        for reconciliation_session in sessions
+    ]
 
-    bank_matched = sum(1 for tx in bank_transactions if tx.status == "matched")
-    book_matched = sum(1 for tx in book_transactions if tx.status == "matched")
 
-    total_bank = len(bank_transactions)
-    total_book = len(book_transactions)
+@router.post(
+    "/session/{session_id}/close",
+    response_model=ReconciliationSessionResponse,
+)
+async def close_reconciliation_session(
+    session_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Close a monthly reconciliation session."""
+    reconciliation_session = get_reconciliation_session_or_404(
+        session_id,
+        db,
+        current_user,
+    )
+    closed_session = reconciliation_service.close_session(reconciliation_session, db)
+    audit_service.log(
+        db=db,
+        org_id=current_user.org_id,
+        actor_user_id=current_user.id,
+        action="reconciliation_session.closed",
+        entity_type="reconciliation_session",
+        entity_id=str(session_id),
+        metadata={"period_month": closed_session.period_month},
+    )
+    return ReconciliationSessionResponse.model_validate(closed_session)
 
-    progress = 0
-    if total_bank + total_book > 0:
-        progress = int(((bank_matched + book_matched) / (total_bank + total_book)) * 100)
 
-    match_groups = db.query(MatchGroup).filter(
-        MatchGroup.org_id == org_id
-    ).all()
+@router.post(
+    "/session/{session_id}/reopen",
+    response_model=ReconciliationSessionResponse,
+)
+async def reopen_reconciliation_session(
+    session_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Reopen a previously closed monthly reconciliation session."""
+    reconciliation_session = get_reconciliation_session_or_404(
+        session_id,
+        db,
+        current_user,
+    )
+    reopened_session = reconciliation_service.reopen_session(reconciliation_session, db)
+    audit_service.log(
+        db=db,
+        org_id=current_user.org_id,
+        actor_user_id=current_user.id,
+        action="reconciliation_session.reopened",
+        entity_type="reconciliation_session",
+        entity_id=str(session_id),
+        metadata={"period_month": reopened_session.period_month},
+    )
+    return ReconciliationSessionResponse.model_validate(reopened_session)
 
-    return ReconciliationStatusResponse(
-        total_bank_transactions=total_bank,
-        matched_bank_transactions=bank_matched,
-        total_book_transactions=total_book,
-        matched_book_transactions=book_matched,
-        unmatched_suggestions=[],
-        match_groups=[MatchGroupResponse.from_orm(mg) for mg in match_groups],
-        progress_percent=progress,
+
+@router.get("/report/{org_id}/{bank_session_id}/{book_session_id}")
+async def download_reconciliation_report(
+    org_id: UUID,
+    bank_session_id: UUID,
+    book_session_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Download a CSV reconciliation report for the current month."""
+    get_org_or_404(org_id, db, current_user)
+    get_upload_session_or_404(bank_session_id, db, current_user)
+    get_upload_session_or_404(book_session_id, db, current_user)
+    bank_transactions, book_transactions = processing_service.get_transactions_for_sessions(
+        bank_session_id, book_session_id, db
+    )
+    reconciliation_session = reconciliation_service.get_or_create_session(
+        org_id=org_id,
+        bank_upload_session_id=bank_session_id,
+        book_upload_session_id=book_session_id,
+        bank_transactions=bank_transactions,
+        book_transactions=book_transactions,
+        db=db,
+    )
+    db.commit()
+    db.refresh(reconciliation_session)
+    summary = reconciliation_service.build_summary(
+        reconciliation_session=reconciliation_session,
+        bank_transactions=bank_transactions,
+        book_transactions=book_transactions,
+    )
+    csv_content = reconciliation_service.build_report_csv(
+        reconciliation_session=reconciliation_session,
+        summary=summary,
+        bank_transactions=bank_transactions,
+        book_transactions=book_transactions,
+    )
+
+    filename = f"reconciliation-{reconciliation_session.period_month}.csv"
+    audit_service.log(
+        db=db,
+        org_id=current_user.org_id,
+        actor_user_id=current_user.id,
+        action="report.downloaded",
+        entity_type="reconciliation_session",
+        entity_id=str(reconciliation_session.id),
+        metadata={"period_month": reconciliation_session.period_month},
+    )
+    return Response(
+        content=csv_content,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

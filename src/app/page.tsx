@@ -4,21 +4,26 @@ import { useReconciliationStore } from "@/store/reconciliation-api";
 import UploadStep from "@/components/UploadStepConnected";
 import MappingStep from "@/components/MappingStepConnected";
 import ReconciliationStep from "@/components/ReconciliationStepConnected";
+import HistoryStep from "@/components/HistoryStepConnected";
+import AuthStep from "@/components/AuthStepConnected";
+import OperationsDashboard from "@/components/OperationsDashboardConnected";
 import { useEffect } from "react";
 import { Heart } from "lucide-react";
 
 export default function Home() {
-  const { step, error, initOrg } = useReconciliationStore();
+  const { step, error, hydrateAuth, authStatus } = useReconciliationStore();
 
   useEffect(() => {
-    initOrg().catch((e) => {
-      console.warn("⚠️ Failed to initialize org:", e);
+    hydrateAuth().catch((e) => {
+      console.warn("⚠️ Failed to restore session:", e);
     });
 
     // Optional: Check backend health on load
     const checkHealth = async () => {
+      const apiBaseUrl =
+        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
       try {
-        const response = await fetch("http://localhost:8000/health");
+        const response = await fetch(`${apiBaseUrl}/health`);
         if (response.ok) {
           console.log("✅ Backend is healthy");
         } else {
@@ -29,7 +34,7 @@ export default function Home() {
       }
     };
     checkHealth();
-  }, [initOrg]);
+  }, [hydrateAuth]);
 
   return (
     <>
@@ -52,9 +57,17 @@ export default function Home() {
         </div>
       )}
 
-      {step === "upload" && <UploadStep />}
-      {step === "mapping" && <MappingStep />}
-      {step === "reconciliation" && <ReconciliationStep />}
+      {authStatus !== "authenticated" ? (
+        <AuthStep />
+      ) : (
+        <>
+          {step === "upload" && <UploadStep />}
+          {step === "mapping" && <MappingStep />}
+          {step === "reconciliation" && <ReconciliationStep />}
+          {step === "history" && <HistoryStep />}
+          {step === "ops" && <OperationsDashboard />}
+        </>
+      )}
     </>
   );
 }

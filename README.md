@@ -1,314 +1,367 @@
 # AI Reconciliation SaaS
 
-AI Reconciliation SaaS is a full-stack reconciliation MVP built with a Next.js frontend, a FastAPI backend, and PostgreSQL. The current codebase is no longer just a UI prototype: it supports organization bootstrap, file upload sessions, extraction of bank and cash book files, AI-assisted column mapping, transaction standardization, database persistence, and a review workflow for reconciliation matches.
+AI Reconciliation SaaS is a multi-tenant reconciliation platform built with a Next.js frontend, a FastAPI backend, PostgreSQL, Redis, and RQ workers.
 
-## What the app currently does
+The current app supports:
 
-The app implements a connected end-to-end flow:
-
-1. **Bootstrap an organization** for local/dev usage.
-2. **Upload two files**: a bank statement and a cash book.
-3. **Extract data** from PDF, XLSX, or CSV files.
-4. **Guess the column mapping** and let the user verify or correct it.
-5. **Standardize transactions** into a common schema and persist them.
-6. **Run reconciliation** to generate pending matches and unmatched suggestions.
-7. **Approve or reject matches** from the reconciliation workspace.
+- authenticated tenant-scoped workspaces
+- admin/reviewer roles
+- bank statement and cash book upload
+- PDF, XLSX, XLS, and CSV ingestion
+- Azure Document Intelligence + local PDF + OCR fallback extraction
+- AI-assisted column mapping
+- transaction standardization and persistence
+- queued extraction and reconciliation jobs
+- monthly reconciliation history and carry-forward balances
+- CSV reconciliation reports
+- audit trail for user actions
+- password reset and change flows
+- admin dead-letter dashboard for failed jobs
 
 ## Current product workflow
 
-### 1) Upload
-The frontend upload step accepts **PDF, XLSX, XLS, and CSV** files up to **10 MB** and tracks separate upload sessions for `bank` and `book` sources.
+### 1. Authentication
 
-### 2) Extraction and mapping
-After upload, the app moves into a mapping flow where it:
+Users can:
 
-- extracts preview rows,
-- detects column headers,
-- proposes a mapping for `date`, `narration`, `reference`, and either `amount` or `debit`/`credit`,
-- shows extraction confidence and method,
-- lets the user confirm or override the mapping.
+- register a new workspace as tenant admin
+- sign in to an existing workspace
+- change their password after signing in
+- request a password reset email
 
-### 3) Standardization
-Once the user confirms the mapping, the backend standardizes rows into a common transaction shape:
+If SMTP is not configured in development, the reset flow falls back to showing the raw reset token in the UI.
 
-- `trans_date`
+### 2. Upload
+
+Admins upload:
+
+- one bank statement
+- one cash book
+
+Supported formats:
+
+- PDF
+- XLSX / XLS
+- CSV
+
+The upload flow creates reusable upload sessions and stores source files for retry-safe background processing.
+
+### 3. Extraction and mapping
+
+The backend extracts preview rows and proposes a column mapping for:
+
+- `date`
 - `narration`
 - `reference`
-- `amount`
+- either `amount`
+- or `debit` + `credit`
 
-The standardized transactions are then stored in PostgreSQL as either bank or book transactions.
+The mapping UI supports validation, previews, and debit/credit-aware bank statement handling.
 
-### 4) Reconciliation workspace
-When both files are mapped, the reconciliation workspace starts the backend matching process and shows:
+### 4. Standardization
 
-- progress across uploaded transactions,
-- pending / approved / rejected match counts,
-- unmatched bank transactions,
-- AI-generated suggestions for candidate book matches,
-- match review, manual match creation, bulk approval, and rejection.
+After mapping is confirmed, rows are standardized into a common transaction shape and persisted as:
 
-## Architecture
+- `bank_transactions`
+- `book_transactions`
+
+The standardization layer also applies the bank-vs-cash-book polarity rules needed for reconciliation.
+
+### 5. Reconciliation
+
+Once both files are ready, reconciliation runs as a queued background job.
+
+The UI supports:
+
+- pending match review
+- approval / rejection
+- bulk approval / rejection
+- manual matching
+- monthly session close / reopen
+- status feedback and activity tracking
+
+### 6. History and reporting
+
+The app keeps monthly reconciliation sessions with:
+
+- opening balances
+- closing balances
+- carry-forward continuity
+- downloadable CSV reports
+
+### 7. Operations and security
+
+Admins now have access to:
+
+- a dedicated operations dashboard
+- failed / dead-lettered job visibility
+- job retry controls
+- team member management
+
+All authenticated users can view recent audit activity for the workspace.
+
+## Stack
 
 ### Frontend
-- **Framework:** Next.js 15
-- **Language:** TypeScript
-- **UI:** React 19 + Tailwind CSS
-- **State management:** Zustand
-- **Icons:** Lucide React
+
+- Next.js 15
+- React 19
+- TypeScript
+- Tailwind CSS
+- Zustand
+- Lucide React
 
 ### Backend
-- **Framework:** FastAPI
-- **ORM:** SQLAlchemy
-- **Validation/config:** Pydantic + pydantic-settings
-- **Database:** PostgreSQL
 
-### Matching and ingestion utilities
-- **Fuzzy matching:** RapidFuzz
-- **Excel parsing:** openpyxl
-- **PDF parsing:** pdfplumber
-- **OCR fallback:** pdf2image + pytesseract
-- **Cloud PDF extraction (optional):** Azure AI Document Intelligence
-- **OpenAI SDK:** present in dependencies for future intelligence extensions
+- FastAPI
+- SQLAlchemy
+- Alembic
+- PostgreSQL
+- Redis
+- RQ
+- Pydantic Settings
+- JWT auth
 
-## Extraction behavior
+### Extraction and document processing
 
-The extraction service uses different strategies depending on file type:
-
-- **CSV:** parsed locally with Python's `csv` module
-- **XLSX:** parsed with `openpyxl`
-- **PDF:**
-  - first tries **Azure AI Document Intelligence** when properly configured,
-  - otherwise falls back to **local pdfplumber-based extraction**,
-  - and finally to **OCR** when needed and available
-
-The backend also returns the extraction method and confidence so the UI can warn the user when results need closer verification.
-
-## Matching behavior
-
-The matching engine currently supports:
-
-- **deterministic 1:1 matching** for strong exact matches,
-- **probabilistic 1:1 matching** using a weighted confidence score,
-- **1:N combination matching** for split or consolidated entries.
-
-Current signal weights are:
-
-- **Value:** 50%
-- **Date:** 20%
-- **Reference:** 20%
-- **Narration:** 10%
-
-Narration similarity is computed with RapidFuzz.
-
-## Tech stack summary
-
-### Frontend dependencies
-- next
-- react
-- react-dom
-- typescript
-- tailwindcss
-- zustand
-- lucide-react
-- clsx
-
-### Backend dependencies
-- fastapi
-- uvicorn
-- sqlalchemy
-- psycopg
-- alembic
-- python-multipart
-- polars
-- rapidfuzz
-- openai
-- azure-ai-documentintelligence
 - openpyxl
 - pdfplumber
 - pdf2image
 - pytesseract
-- pillow
+- Pillow
+- Azure AI Document Intelligence
 
-## Project structure
+### Matching
 
-```text
-.
-├── backend/
-│   ├── app/
-│   │   ├── main.py
-│   │   ├── config.py
-│   │   ├── routes/
-│   │   │   ├── organizations.py
-│   │   │   ├── reconciliation.py
-│   │   │   └── uploads.py
-│   │   ├── services/
-│   │   │   ├── extraction_service.py
-│   │   │   ├── matching_service.py
-│   │   │   └── standardization_service.py
-│   │   └── database/
-│   ├── Dockerfile
-│   └── requirements.txt
-├── src/
-│   ├── app/
-│   │   └── page.tsx
-│   ├── components/
-│   │   ├── UploadStepConnected.tsx
-│   │   ├── MappingStepConnected.tsx
-│   │   ├── ReconciliationStepConnected.tsx
-│   │   └── MatchReviewPanel.tsx
-│   ├── lib/
-│   │   └── api.ts
-│   └── store/
-│       └── reconciliation-api.ts
-├── Dockerfile.frontend
-├── docker-compose.yml
-└── package.json
-```
+- RapidFuzz
 
-## Running locally
+## Architecture highlights
+
+- `frontend` talks to the FastAPI API over HTTP
+- `api` persists state in PostgreSQL
+- `api` enqueues long-running work in Redis / RQ
+- `worker` executes extraction and reconciliation jobs
+- uploaded source files are persisted for retry-safe background execution
+- Alembic handles schema evolution
+
+## Local development
 
 ### Option 1: Docker Compose
+
 This is the easiest way to run the full stack.
 
 ```bash
-docker-compose up --build
+docker compose up --build
 ```
 
-This starts:
+Services:
 
-- **PostgreSQL** on `localhost:5432`
-- **FastAPI backend** on `localhost:8000`
-- **Next.js frontend** on `localhost:3001`
+- frontend: `http://localhost:3001`
+- api: `http://localhost:8000`
+- postgres: `localhost:5432`
+- redis: `localhost:6379`
 
 Notes:
-- The frontend container runs on port `3000` internally but is mapped to **host port `3001`**.
-- The backend container waits for PostgreSQL health before starting.
-- The backend startup command installs requirements and runs Uvicorn with reload.
 
-### Option 2: Run services manually
+- the frontend runs on port `3000` inside the container and is exposed as `3001` on the host
+- the backend startup script runs Alembic before starting
+- the worker starts after database and Redis health checks pass
 
-#### Start PostgreSQL
-Run a local PostgreSQL instance and create a database named `reconciliation`.
-
-#### Start the backend
-From `backend/`:
+### Option 2: Production-style image build
 
 ```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
+```
+
+### Option 3: Run manually
+
+Backend:
+
+```bash
+cd backend
 pip install -r requirements.txt
+alembic upgrade head
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-#### Start the frontend
-From the repo root:
+Frontend:
 
 ```bash
 npm install
 npm run dev
 ```
 
-By default, Next.js will run on `localhost:3000` unless you override the port.
+Worker:
+
+```bash
+cd backend
+rq worker reconciliation -u redis://localhost:6379/0
+```
 
 ## Environment configuration
 
-### Backend `.env`
-The backend reads configuration from environment variables and also supports a local `.env` file.
+Use:
 
-Example:
+- `.env.example` for development
+- `.env.staging.example` for staging
+- `.env.production.example` for production
+- `backend/.env.example` for backend-only local runs
+
+### Core backend settings
+
+Important variables:
 
 ```env
-DATABASE_URL=postgresql+psycopg://dev:password@localhost:5432/reconciliation
-DEBUG=True
+APP_ENV=development
+DATABASE_URL=postgresql+psycopg://dev:password@postgres:5432/reconciliation
+REDIS_URL=redis://redis:6379/0
+UPLOAD_STORAGE_PATH=/app/storage/uploads
+FRONTEND_APP_URL=http://localhost:3001
+JWT_SECRET_KEY=dev-secret-change-me
+JOB_MAX_RETRIES=3
+PASSWORD_RESET_TOKEN_EXPIRE_MINUTES=30
+```
+
+### Optional extraction settings
+
+```env
 OPENAI_API_KEY=
 AZURE_AI_KEY=
 AZURE_AI_ENDPOINT=
-CLERK_SECRET_KEY=
 ```
 
-Useful defaults already exist in code and Docker Compose, but real Azure credentials are required if you want cloud PDF extraction.
+### Password reset email delivery
 
-### Frontend `.env.local`
-If you want to point the frontend to a non-default API URL:
+The app sends password reset emails through SMTP when configured.
+
+Required variables:
 
 ```env
-NEXT_PUBLIC_API_URL=http://localhost:8000
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USERNAME=
+SMTP_PASSWORD=
+SMTP_FROM_EMAIL=
+SMTP_FROM_NAME=AI Reconciliation SaaS
+SMTP_USE_STARTTLS=true
+SMTP_USE_SSL=false
 ```
 
-If this variable is not set, the frontend falls back to `http://localhost:8000`.
+Gmail / Google Workspace example:
 
-## API surface
+```env
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USERNAME=your-google-email@gmail.com
+SMTP_PASSWORD=your-google-app-password
+SMTP_FROM_EMAIL=your-google-email@gmail.com
+SMTP_FROM_NAME=AI Reconciliation SaaS
+SMTP_USE_STARTTLS=true
+SMTP_USE_SSL=false
+```
 
-### Organization routes
-- `POST /api/orgs` — create an organization
-- `POST /api/orgs/bootstrap` — fetch or create a default org for local/dev
+Notes for Gmail:
 
-### Upload routes
-- `POST /api/uploads/create-session/{org_id}?source=bank|book`
-- `POST /api/uploads/extract/{session_id}`
-- `POST /api/uploads/confirm-mapping/{session_id}`
-- `GET /api/uploads/session/{session_id}`
-- `GET /api/uploads/transactions/{session_id}/bank`
-- `GET /api/uploads/transactions/{session_id}/book`
+- use a Google App Password, not your normal Gmail password
+- `SMTP_PORT=587` with `SMTP_USE_STARTTLS=true` is the correct pairing
+- `SMTP_USERNAME` and `SMTP_FROM_EMAIL` should usually be the same mailbox
 
-### Reconciliation routes
-- `POST /api/reconciliation/start/{org_id}`
-- `POST /api/reconciliation/match/{org_id}`
-- `POST /api/reconciliation/match/{match_id}/approve`
-- `DELETE /api/reconciliation/match/{match_id}`
-- `GET /api/reconciliation/status/{org_id}/{bank_session_id}/{book_session_id}`
+Behavior:
 
-### Health route
-- `GET /health`
+- if SMTP is configured, users receive a reset email with a direct link back to the app
+- if SMTP is not configured and `APP_ENV=development`, the raw reset token is returned in the auth UI for local testing
+- if SMTP fails in production, the API returns an error instead of silently pretending delivery worked
 
-## Frontend state model
+The reset email link points to:
 
-The Zustand store in `src/store/reconciliation-api.ts` manages:
+```env
+FRONTEND_APP_URL
+```
 
-- current step (`upload`, `mapping`, `reconciliation`, `complete`),
-- bank and book upload session IDs,
-- uploaded files,
-- extracted and standardized transactions,
-- match groups,
-- unmatched suggestions,
-- activity log,
-- loading, errors, and progress.
+So for local Docker development this should usually stay:
 
-## Important implementation details
+```env
+FRONTEND_APP_URL=http://localhost:3001
+```
 
-- Tables are created automatically at backend startup via SQLAlchemy metadata creation.
-- The app persists uploaded-session metadata, transactions, match groups, and ingestion fingerprints in PostgreSQL.
-- Mapping confirmation can save a learned fingerprint for future uploads.
-- Bulk approval and rejection are supported from the frontend.
-- The homepage performs a backend health check against `http://localhost:8000/health` during load.
+## Auth and tenancy
 
-## Known limitations / MVP notes
+- every authenticated user belongs to exactly one organization
+- tenant access is enforced server-side
+- admins can upload, run jobs, create users, close/reopen sessions, and retry jobs
+- reviewers can inspect workspaces, approve/reject matches, and download reports
 
-This repository is beyond the original mock prototype, but it is still an MVP.
+## Background jobs
 
-Current limitations include:
+Extraction and reconciliation are persisted as `processing_jobs`.
 
-- no production authentication flow yet,
-- no background jobs or async worker pipeline,
-- local/dev bootstrap organization flow instead of a full tenant onboarding system,
-- limited reporting/export flow,
-- heuristic column guessing rather than a full LLM-driven mapping system,
-- fingerprinting logic is still simplistic,
-- some workflow polish remains around completion and production deployment.
+Jobs support:
 
-## What changed relative to the old README
+- queued
+- running
+- completed
+- failed
+- dead-lettered
 
-The previous README described this repo as a mostly mock, UI-only prototype. That is no longer accurate.
+When a job fails:
 
-This updated README reflects that the current codebase includes:
+- it is retried automatically up to `JOB_MAX_RETRIES`
+- once retries are exhausted, it moves to `dead_lettered`
+- admins can manually retry it from the operations dashboard
 
-- a real FastAPI backend,
-- a PostgreSQL database,
-- connected frontend API calls,
-- real upload and extraction endpoints,
-- transaction standardization,
-- persisted reconciliation match groups,
-- bulk review actions,
-- Docker-based local startup for the whole stack.
+## Audit trail
 
-## License
+The app stores audit events for actions such as:
 
-Built for demonstration and MVP development purposes.
+- registration and login
+- user creation
+- password changes
+- password reset requests and completion
+- upload session creation and reuse
+- job enqueue and retry
+- mapping confirmation
+- match approval and rejection
+- month close and reopen
+- report downloads
+
+## Project structure
+
+```text
+.
+├── backend/
+│   ├── alembic/
+│   ├── app/
+│   │   ├── database/
+│   │   ├── dependencies/
+│   │   ├── routes/
+│   │   ├── services/
+│   │   ├── config.py
+│   │   └── main.py
+│   ├── scripts/
+│   ├── Dockerfile
+│   └── Dockerfile.dev
+├── src/
+│   ├── app/
+│   ├── components/
+│   ├── lib/
+│   └── store/
+├── docker-compose.yml
+├── docker-compose.prod.yml
+├── Dockerfile.frontend
+├── Dockerfile.frontend.dev
+└── README.md
+```
+
+## Verification commands
+
+Useful checks:
+
+```bash
+python3 -m compileall backend/app backend/alembic
+npm run build
+docker compose config
+```
+
+## Status
+
+This is no longer just a static MVP shell. It now includes real auth, tenancy, queueing, reporting, auditability, and operational recovery flows, while still leaving room for deeper production hardening like SSO, external object storage, alerts, and richer reporting.
