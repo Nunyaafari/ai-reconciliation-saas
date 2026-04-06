@@ -187,7 +187,7 @@ async def start_reconciliation_async(
     return job_service.serialize_job(job)
 
 
-@router.post("/match/{org_id}", response_model=MatchGroupResponse)
+@router.post("/match/manual/{org_id}", response_model=MatchGroupResponse)
 async def create_manual_match(
     org_id: UUID,
     match_request: MatchGroupCreate,

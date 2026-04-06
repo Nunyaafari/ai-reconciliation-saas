@@ -340,7 +340,7 @@ class ApiClient {
     bookTransactionIds: string[],
     confidenceScore: number
   ): Promise<ApiResponse<any>> {
-    return this.request(`/api/reconciliation/match/${orgId}`, {
+    return this.request(`/api/reconciliation/match/manual/${orgId}`, {
       method: "POST",
       body: JSON.stringify({
         bank_transaction_ids: bankTransactionIds,
