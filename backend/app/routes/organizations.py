@@ -6,7 +6,14 @@ from typing import Optional
 from app.config import settings
 from app.database import get_db
 from app.database.models import Organization
-from app.schemas import OrganizationCreate, OrganizationResponse, OrganizationBootstrap
+from app.dependencies.auth import get_admin_user, get_current_organization
+from app.schemas import (
+    OrganizationBootstrap,
+    OrganizationCreate,
+    OrganizationResponse,
+    OrganizationUpdate,
+)
+from app.services.audit_service import audit_service
 
 router = APIRouter(prefix="/api/orgs", tags=["Organizations"])
 logger = logging.getLogger(__name__)
@@ -54,3 +61,44 @@ async def bootstrap_organization(
     db.refresh(org)
     logger.info(f"Bootstrapped organization {org.id} ({org.slug})")
     return OrganizationResponse.model_validate(org)
+
+
+@router.patch("/current", response_model=OrganizationResponse)
+async def update_current_organization(
+    payload: OrganizationUpdate,
+    current_org: Organization = Depends(get_current_organization),
+    admin_user=Depends(get_admin_user),
+    db: Session = Depends(get_db),
+):
+    """Update workspace-wide branding details that apply across reconciliations."""
+    if payload.name is not None:
+        normalized_name = payload.name.strip()
+        if not normalized_name:
+            raise HTTPException(status_code=400, detail="Workspace name cannot be blank")
+        current_org.name = normalized_name
+
+    if payload.company_address is not None:
+        current_org.company_address = payload.company_address.strip() or None
+
+    if payload.company_logo_data_url is not None:
+        current_org.company_logo_data_url = payload.company_logo_data_url.strip() or None
+
+    db.add(current_org)
+    db.commit()
+    db.refresh(current_org)
+
+    audit_service.log(
+        db=db,
+        org_id=current_org.id,
+        actor_user_id=admin_user.id,
+        action="organization.updated",
+        entity_type="organization",
+        entity_id=str(current_org.id),
+        metadata={
+            "name": current_org.name,
+            "has_company_address": bool(current_org.company_address),
+            "has_company_logo": bool(current_org.company_logo_data_url),
+        },
+    )
+
+    return OrganizationResponse.model_validate(current_org)

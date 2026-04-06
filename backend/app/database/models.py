@@ -18,6 +18,8 @@ class Organization(Base):
     name = Column(String(255), nullable=False)
     slug = Column(String(255), unique=True, nullable=False)
     email = Column(String(255), nullable=False)
+    company_address = Column(Text, nullable=True)
+    company_logo_data_url = Column(Text, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -93,6 +95,11 @@ class BankTransaction(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
     upload_session_id = Column(UUID(as_uuid=True), ForeignKey("upload_sessions.id"), nullable=True)
+    reconciliation_session_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("reconciliation_sessions.id"),
+        nullable=True,
+    )
 
     # Core fields (prescribed fields)
     trans_date = Column(DateTime, nullable=False)
@@ -106,15 +113,20 @@ class BankTransaction(Base):
 
     # Metadata
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    is_removed = Column(Boolean, nullable=False, default=False)
+    removed_at = Column(DateTime, nullable=True)
+    is_carryforward = Column(Boolean, nullable=False, default=False)
 
     # Relationships
     organization = relationship("Organization", back_populates="bank_transactions")
     match_group = relationship("MatchGroup", back_populates="bank_transactions")
+    reconciliation_session = relationship("ReconciliationSession", back_populates="carryforward_bank_transactions")
 
     __table_args__ = (
         Index("ix_bank_transactions_org_id", "org_id"),
         Index("ix_bank_transactions_trans_date", "trans_date"),
         Index("ix_bank_transactions_match_group_id", "match_group_id"),
+        Index("ix_bank_transactions_reconciliation_session_id", "reconciliation_session_id"),
     )
 
     @property
@@ -143,6 +155,11 @@ class BookTransaction(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
     upload_session_id = Column(UUID(as_uuid=True), ForeignKey("upload_sessions.id"), nullable=True)
+    reconciliation_session_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("reconciliation_sessions.id"),
+        nullable=True,
+    )
 
     # Core fields (prescribed fields)
     trans_date = Column(DateTime, nullable=False)
@@ -156,15 +173,20 @@ class BookTransaction(Base):
 
     # Metadata
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    is_removed = Column(Boolean, nullable=False, default=False)
+    removed_at = Column(DateTime, nullable=True)
+    is_carryforward = Column(Boolean, nullable=False, default=False)
 
     # Relationships
     organization = relationship("Organization", back_populates="book_transactions")
     match_group = relationship("MatchGroup", back_populates="book_transactions")
+    reconciliation_session = relationship("ReconciliationSession", back_populates="carryforward_book_transactions")
 
     __table_args__ = (
         Index("ix_book_transactions_org_id", "org_id"),
         Index("ix_book_transactions_trans_date", "trans_date"),
         Index("ix_book_transactions_match_group_id", "match_group_id"),
+        Index("ix_book_transactions_reconciliation_session_id", "reconciliation_session_id"),
     )
 
     @property
@@ -267,6 +289,8 @@ class UploadSession(Base):
     file_size = Column(Integer, nullable=False)  # bytes
     file_type = Column(String(50), nullable=False)  # pdf, xlsx, csv
     upload_source = Column(String(50), nullable=False)  # bank, book
+    account_name = Column(String(255), nullable=True)
+    period_month = Column(String(7), nullable=True)  # YYYY-MM
 
     # Processing status
     status = Column(SQLEnum("uploaded", "extracting", "mapping", "reconciling", "complete", "failed", name="session_status"), default="uploaded")
@@ -290,6 +314,7 @@ class UploadSession(Base):
         Index("ix_upload_sessions_status", "status"),
         Index("ix_upload_sessions_file_hash", "file_hash"),
         Index("ix_upload_sessions_org_source_hash", "org_id", "upload_source", "file_hash"),
+        Index("ix_upload_sessions_org_account_period", "org_id", "account_name", "period_month"),
     )
 
 
@@ -300,13 +325,23 @@ class ReconciliationSession(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    account_name = Column(String(255), nullable=False, default="Default Account")
+    account_number = Column(String(100), nullable=True)
     period_month = Column(String(7), nullable=False)  # YYYY-MM
     bank_upload_session_id = Column(UUID(as_uuid=True), ForeignKey("upload_sessions.id"), nullable=True)
     book_upload_session_id = Column(UUID(as_uuid=True), ForeignKey("upload_sessions.id"), nullable=True)
     bank_open_balance = Column(Numeric(15, 2), nullable=False, default=0)
     bank_closing_balance = Column(Numeric(15, 2), nullable=False, default=0)
+    bank_closing_balance_override = Column(Numeric(15, 2), nullable=True)
     book_open_balance = Column(Numeric(15, 2), nullable=False, default=0)
     book_closing_balance = Column(Numeric(15, 2), nullable=False, default=0)
+    book_closing_balance_override = Column(Numeric(15, 2), nullable=True)
+    company_name = Column(String(255), nullable=True)
+    company_address = Column(Text, nullable=True)
+    company_logo_data_url = Column(Text, nullable=True)
+    prepared_by = Column(String(255), nullable=True)
+    reviewed_by = Column(String(255), nullable=True)
+    currency_code = Column(String(10), nullable=False, default="GHS")
     status = Column(String(20), nullable=False, default="open")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -315,12 +350,29 @@ class ReconciliationSession(Base):
     organization = relationship("Organization", back_populates="reconciliation_sessions")
     bank_upload_session = relationship("UploadSession", foreign_keys=[bank_upload_session_id])
     book_upload_session = relationship("UploadSession", foreign_keys=[book_upload_session_id])
+    carryforward_bank_transactions = relationship(
+        "BankTransaction",
+        back_populates="reconciliation_session",
+        foreign_keys="BankTransaction.reconciliation_session_id",
+    )
+    carryforward_book_transactions = relationship(
+        "BookTransaction",
+        back_populates="reconciliation_session",
+        foreign_keys="BookTransaction.reconciliation_session_id",
+    )
 
     __table_args__ = (
         Index("ix_reconciliation_sessions_org_id", "org_id"),
+        Index("ix_reconciliation_sessions_account_name", "account_name"),
         Index("ix_reconciliation_sessions_period_month", "period_month"),
         Index("ix_reconciliation_sessions_status", "status"),
-        Index("ix_reconciliation_sessions_org_period", "org_id", "period_month", unique=True),
+        Index(
+            "ix_reconciliation_sessions_org_account_period",
+            "org_id",
+            "account_name",
+            "period_month",
+            unique=True,
+        ),
     )
 
 

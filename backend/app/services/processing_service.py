@@ -1,4 +1,5 @@
 import logging
+import time
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -8,10 +9,12 @@ from app.database.models import (
     BookTransaction,
     MatchGroup,
     Organization,
+    ReconciliationSession,
     UploadSession,
 )
 from app.schemas import (
     BankTransactionResponse,
+    BookTransactionResponse,
     DataExtractionResponse,
     MatchSuggestion,
     ReconciliationStatusResponse,
@@ -45,10 +48,12 @@ class ProcessingService:
         db.commit()
 
         try:
+            started_at = time.perf_counter()
             extraction_result = self.extraction_service.extract(
                 file_content=file_content,
                 file_type=session.file_type,
                 org_id=session.org_id,
+                preview_mode=True,
             )
 
             if not extraction_result.get("raw_data") and not extraction_result.get(
@@ -62,12 +67,25 @@ class ProcessingService:
                 raw_data=extraction_result["raw_data"],
                 org_id=session.org_id,
                 column_headers=extraction_result.get("column_headers", []),
+                upload_source=session.upload_source,
+            )
+            preview_metrics = self.extraction_service.build_preview_metrics(
+                raw_data=extraction_result["raw_data"],
+                column_headers=extraction_result.get("column_headers", []),
             )
 
             session.status = "mapping"
             session.rows_extracted = len(extraction_result["raw_data"])
             session.error_message = None
             db.commit()
+
+            elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            logger.info(
+                "Built extraction preview for session %s in %sms using %s",
+                session.id,
+                elapsed_ms,
+                extraction_result.get("method", "unknown"),
+            )
 
             return DataExtractionResponse(
                 extraction_id=str(session.id),
@@ -76,6 +94,8 @@ class ProcessingService:
                 ai_guess_mapping=ai_mapping,
                 ai_confidence=extraction_result.get("confidence", 75),
                 extraction_method=extraction_result.get("method", "unknown"),
+                total_rows=preview_metrics["total_rows"],
+                column_metrics=preview_metrics["column_metrics"],
             )
         except Exception as exc:
             session.status = "failed"
@@ -108,23 +128,62 @@ class ProcessingService:
         if not book_session:
             raise ValueError("Book upload session not found")
 
-        bank_transactions = (
+        account_name, period_month = self.reconciliation_service.resolve_reconciliation_context(
+            bank_upload_session=bank_session,
+            book_upload_session=book_session,
+            bank_transactions=[],
+            book_transactions=[],
+        )
+
+        bank_upload_transactions = (
             db.query(BankTransaction)
             .filter(
                 BankTransaction.upload_session_id == bank_session_id,
-                BankTransaction.status == "unreconciled",
             )
             .all()
         )
 
-        book_transactions = (
+        book_upload_transactions = (
             db.query(BookTransaction)
             .filter(
                 BookTransaction.upload_session_id == book_session_id,
-                BookTransaction.status == "unreconciled",
             )
             .all()
         )
+
+        reconciliation_session = self.reconciliation_service.get_or_create_session(
+            org_id=org_id,
+            account_name=account_name,
+            period_month=period_month,
+            bank_upload_session_id=bank_session_id,
+            book_upload_session_id=book_session_id,
+            bank_transactions=bank_upload_transactions,
+            book_transactions=book_upload_transactions,
+            db=db,
+        )
+        self._attach_transactions_to_reconciliation_session(
+            reconciliation_session=reconciliation_session,
+            bank_transactions=bank_upload_transactions,
+            book_transactions=book_upload_transactions,
+        )
+        db.commit()
+        db.refresh(reconciliation_session)
+
+        bank_transactions, book_transactions = self.get_transactions_for_reconciliation_session(
+            reconciliation_session,
+            db,
+        )
+
+        bank_transactions = [
+            tx
+            for tx in bank_transactions
+            if tx.status == "unreconciled" and not tx.is_removed
+        ]
+        book_transactions = [
+            tx
+            for tx in book_transactions
+            if tx.status == "unreconciled" and not tx.is_removed
+        ]
 
         matches = self.matching_service.match_transactions(
             bank_transactions=bank_transactions,
@@ -159,22 +218,12 @@ class ProcessingService:
 
         db.commit()
 
-        unmatched_book = (
-            db.query(BookTransaction)
-            .filter(
-                BookTransaction.upload_session_id == book_session_id,
-                BookTransaction.status == "unreconciled",
-            )
-            .all()
-        )
-        unmatched_bank = (
-            db.query(BankTransaction)
-            .filter(
-                BankTransaction.upload_session_id == bank_session_id,
-                BankTransaction.status == "unreconciled",
-            )
-            .all()
-        )
+        unmatched_book = [
+            tx for tx in book_transactions if tx.status == "unreconciled" and not tx.is_removed
+        ]
+        unmatched_bank = [
+            tx for tx in bank_transactions if tx.status == "unreconciled" and not tx.is_removed
+        ]
 
         unmatched_suggestions = []
         for bank_tx in unmatched_bank:
@@ -204,7 +253,22 @@ class ProcessingService:
             book_session_id=book_session_id,
             db=db,
             unmatched_suggestions=unmatched_suggestions,
+            reconciliation_session=reconciliation_session,
         )
+
+    def _attach_transactions_to_reconciliation_session(
+        self,
+        reconciliation_session: ReconciliationSession,
+        bank_transactions: list[BankTransaction],
+        book_transactions: list[BookTransaction],
+    ) -> None:
+        for transaction in bank_transactions:
+            if transaction.reconciliation_session_id != reconciliation_session.id:
+                transaction.reconciliation_session_id = reconciliation_session.id
+
+        for transaction in book_transactions:
+            if transaction.reconciliation_session_id != reconciliation_session.id:
+                transaction.reconciliation_session_id = reconciliation_session.id
 
     def get_transactions_for_sessions(
         self,
@@ -224,6 +288,47 @@ class ProcessingService:
             .order_by(BookTransaction.trans_date.asc(), BookTransaction.created_at.asc())
             .all()
         )
+        return bank_transactions, book_transactions
+
+    def get_transactions_for_reconciliation_session(
+        self,
+        reconciliation_session: ReconciliationSession,
+        db: Session,
+    ) -> tuple[list[BankTransaction], list[BookTransaction]]:
+        bank_query = db.query(BankTransaction).filter(
+            BankTransaction.org_id == reconciliation_session.org_id
+        )
+        if reconciliation_session.bank_upload_session_id:
+            bank_query = bank_query.filter(
+                (BankTransaction.upload_session_id == reconciliation_session.bank_upload_session_id)
+                | (BankTransaction.reconciliation_session_id == reconciliation_session.id)
+            )
+        else:
+            bank_query = bank_query.filter(
+                BankTransaction.reconciliation_session_id == reconciliation_session.id
+            )
+
+        book_query = db.query(BookTransaction).filter(
+            BookTransaction.org_id == reconciliation_session.org_id
+        )
+        if reconciliation_session.book_upload_session_id:
+            book_query = book_query.filter(
+                (BookTransaction.upload_session_id == reconciliation_session.book_upload_session_id)
+                | (BookTransaction.reconciliation_session_id == reconciliation_session.id)
+            )
+        else:
+            book_query = book_query.filter(
+                BookTransaction.reconciliation_session_id == reconciliation_session.id
+            )
+
+        bank_transactions = bank_query.order_by(
+            BankTransaction.trans_date.asc(),
+            BankTransaction.created_at.asc(),
+        ).all()
+        book_transactions = book_query.order_by(
+            BookTransaction.trans_date.asc(),
+            BookTransaction.created_at.asc(),
+        ).all()
         return bank_transactions, book_transactions
 
     def get_match_groups_for_transactions(
@@ -249,37 +354,106 @@ class ProcessingService:
     def build_status_response(
         self,
         org_id: UUID,
-        bank_session_id: UUID,
-        book_session_id: UUID,
+        bank_session_id: UUID | None,
+        book_session_id: UUID | None,
         db: Session,
         unmatched_suggestions: list[UnmatchedTransactionWithSuggestions] | None = None,
+        reconciliation_session: ReconciliationSession | None = None,
     ) -> ReconciliationStatusResponse:
-        bank_transactions, book_transactions = self.get_transactions_for_sessions(
-            bank_session_id,
-            book_session_id,
+        if reconciliation_session is None:
+            if bank_session_id is None or book_session_id is None:
+                raise ValueError("Upload session context could not be resolved")
+
+            bank_transactions, book_transactions = self.get_transactions_for_sessions(
+                bank_session_id,
+                book_session_id,
+                db,
+            )
+
+            bank_session = db.query(UploadSession).filter(
+                UploadSession.id == bank_session_id
+            ).first()
+            book_session = db.query(UploadSession).filter(
+                UploadSession.id == book_session_id
+            ).first()
+            if not bank_session or not book_session:
+                raise ValueError("Upload session context could not be resolved")
+
+            account_name, period_month = self.reconciliation_service.resolve_reconciliation_context(
+                bank_upload_session=bank_session,
+                book_upload_session=book_session,
+                bank_transactions=bank_transactions,
+                book_transactions=book_transactions,
+            )
+
+            reconciliation_session = self.reconciliation_service.get_or_create_session(
+                org_id=org_id,
+                account_name=account_name,
+                period_month=period_month,
+                bank_upload_session_id=bank_session_id,
+                book_upload_session_id=book_session_id,
+                bank_transactions=bank_transactions,
+                book_transactions=book_transactions,
+                db=db,
+            )
+            self._attach_transactions_to_reconciliation_session(
+                reconciliation_session=reconciliation_session,
+                bank_transactions=bank_transactions,
+                book_transactions=book_transactions,
+            )
+            db.commit()
+            db.refresh(reconciliation_session)
+
+        bank_transactions, book_transactions = self.get_transactions_for_reconciliation_session(
+            reconciliation_session,
             db,
         )
 
-        bank_matched = sum(1 for tx in bank_transactions if tx.status == "matched")
-        book_matched = sum(1 for tx in book_transactions if tx.status == "matched")
-        total_bank = len(bank_transactions)
-        total_book = len(book_transactions)
+        active_bank_transactions = [
+            tx for tx in bank_transactions if not getattr(tx, "is_removed", False)
+        ]
+        active_book_transactions = [
+            tx for tx in book_transactions if not getattr(tx, "is_removed", False)
+        ]
+
+        bank_matched = sum(1 for tx in active_bank_transactions if tx.status == "matched")
+        book_matched = sum(1 for tx in active_book_transactions if tx.status == "matched")
+        total_bank = len(active_bank_transactions)
+        total_book = len(active_book_transactions)
         progress = (
             int(((bank_matched + book_matched) / (total_bank + total_book)) * 100)
             if total_bank + total_book > 0
             else 0
         )
 
-        reconciliation_session = self.reconciliation_service.get_or_create_session(
-            org_id=org_id,
-            bank_upload_session_id=bank_session_id,
-            book_upload_session_id=book_session_id,
-            bank_transactions=bank_transactions,
-            book_transactions=book_transactions,
-            db=db,
-        )
-        db.commit()
-        db.refresh(reconciliation_session)
+        if unmatched_suggestions is None:
+            unmatched_bank = [
+                tx for tx in active_bank_transactions if tx.status == "unreconciled"
+            ]
+            unmatched_book = [
+                tx for tx in active_book_transactions if tx.status == "unreconciled"
+            ]
+            unmatched_suggestions = []
+            for bank_tx in unmatched_bank:
+                suggestions = self.matching_service.get_suggestions_for_transaction(
+                    bank_tx,
+                    unmatched_book,
+                )
+                unmatched_suggestions.append(
+                    UnmatchedTransactionWithSuggestions(
+                        bank_transaction_id=bank_tx.id,
+                        bank_transaction=BankTransactionResponse.model_validate(bank_tx),
+                        suggestions=[
+                            MatchSuggestion(
+                                book_transaction_id=s["book_tx_id"],
+                                confidence_score=s["confidence"],
+                                match_signals=s["signals"],
+                                explanation=s["explanation"],
+                            )
+                            for s in suggestions
+                        ],
+                    )
+                )
 
         summary = self.reconciliation_service.build_summary(
             reconciliation_session=reconciliation_session,
@@ -307,4 +481,10 @@ class ProcessingService:
                 reconciliation_session
             ),
             summary=summary,
+            bank_transactions=[
+                BankTransactionResponse.model_validate(tx) for tx in bank_transactions
+            ],
+            book_transactions=[
+                BookTransactionResponse.model_validate(tx) for tx in book_transactions
+            ],
         )

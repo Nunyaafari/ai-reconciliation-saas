@@ -4,28 +4,51 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
+import bcrypt
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database.models import Organization, PasswordResetToken, User
 
-
-pwd_context = CryptContext(
-    schemes=["bcrypt_sha256", "bcrypt"],
-    deprecated="auto",
-)
-
-
 class AuthService:
     """Password hashing and JWT session helpers."""
 
+    HASH_PREFIX = "bcrypt_sha256$"
+
+    def _normalized_password(self, password: str) -> bytes:
+        return hashlib.sha256(password.encode("utf-8")).hexdigest().encode("utf-8")
+
     def hash_password(self, password: str) -> str:
-        return pwd_context.hash(password)
+        hashed = bcrypt.hashpw(self._normalized_password(password), bcrypt.gensalt())
+        return f"{self.HASH_PREFIX}{hashed.decode('utf-8')}"
 
     def verify_password(self, plain_password: str, password_hash: str) -> bool:
-        return pwd_context.verify(plain_password, password_hash)
+        if not password_hash:
+            return False
+
+        normalized_password = self._normalized_password(plain_password)
+
+        if password_hash.startswith(self.HASH_PREFIX):
+            stored_hash = password_hash.removeprefix(self.HASH_PREFIX).encode("utf-8")
+            return bcrypt.checkpw(normalized_password, stored_hash)
+
+        if password_hash.startswith(("$2a$", "$2b$", "$2y$")):
+            return bcrypt.checkpw(normalized_password, password_hash.encode("utf-8"))
+
+        if password_hash.startswith("$bcrypt-sha256$"):
+            try:
+                from passlib.context import CryptContext
+
+                legacy_context = CryptContext(
+                    schemes=["bcrypt_sha256", "bcrypt"],
+                    deprecated="auto",
+                )
+                return legacy_context.verify(plain_password, password_hash)
+            except Exception:
+                return False
+
+        return False
 
     def set_password(self, user: User, new_password: str, db: Session) -> User:
         user.password_hash = self.hash_password(new_password)

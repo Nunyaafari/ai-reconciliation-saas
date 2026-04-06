@@ -46,6 +46,18 @@ def determine_bootstrap_state() -> str:
             )
             connection.execute(
                 text(
+                    "ALTER TABLE upload_sessions "
+                    "ADD COLUMN IF NOT EXISTS account_name VARCHAR(255)"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE upload_sessions "
+                    "ADD COLUMN IF NOT EXISTS period_month VARCHAR(7)"
+                )
+            )
+            connection.execute(
+                text(
                     "CREATE INDEX IF NOT EXISTS ix_upload_sessions_file_hash "
                     "ON upload_sessions (file_hash)"
                 )
@@ -54,6 +66,41 @@ def determine_bootstrap_state() -> str:
                 text(
                     "CREATE INDEX IF NOT EXISTS ix_upload_sessions_org_source_hash "
                     "ON upload_sessions (org_id, upload_source, file_hash)"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_upload_sessions_org_account_period "
+                    "ON upload_sessions (org_id, account_name, period_month)"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE reconciliation_sessions "
+                    "ADD COLUMN IF NOT EXISTS account_name VARCHAR(255)"
+                )
+            )
+            connection.execute(
+                text(
+                    "UPDATE reconciliation_sessions "
+                    "SET account_name = 'Default Account' "
+                    "WHERE account_name IS NULL OR account_name = ''"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_reconciliation_sessions_account_name "
+                    "ON reconciliation_sessions (account_name)"
+                )
+            )
+            connection.execute(
+                text("DROP INDEX IF EXISTS ix_reconciliation_sessions_org_period")
+            )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "ix_reconciliation_sessions_org_account_period "
+                    "ON reconciliation_sessions (org_id, account_name, period_month)"
                 )
             )
             connection.execute(
@@ -141,6 +188,30 @@ def determine_bootstrap_state() -> str:
                 text(
                     "CREATE INDEX IF NOT EXISTS ix_processing_jobs_job_type "
                     "ON processing_jobs (job_type)"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE bank_transactions "
+                    "ADD COLUMN IF NOT EXISTS is_removed BOOLEAN DEFAULT FALSE"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE bank_transactions "
+                    "ADD COLUMN IF NOT EXISTS removed_at TIMESTAMP"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE book_transactions "
+                    "ADD COLUMN IF NOT EXISTS is_removed BOOLEAN DEFAULT FALSE"
+                )
+            )
+            connection.execute(
+                text(
+                    "ALTER TABLE book_transactions "
+                    "ADD COLUMN IF NOT EXISTS removed_at TIMESTAMP"
                 )
             )
 

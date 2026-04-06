@@ -1,5 +1,6 @@
 import json
 import hashlib
+import importlib
 from typing import Dict, List, Any, Optional
 import logging
 from app.schemas import ColumnMapping
@@ -7,50 +8,68 @@ from datetime import datetime, date
 from io import BytesIO, StringIO
 import csv
 import re
-
-try:
-    import openpyxl
-except Exception:  # pragma: no cover - optional dependency at runtime
-    openpyxl = None
-
-try:
-    import pdfplumber
-except Exception:  # pragma: no cover - optional dependency at runtime
-    pdfplumber = None
-
-try:
-    from pdf2image import convert_from_bytes
-except Exception:  # pragma: no cover - optional dependency at runtime
-    convert_from_bytes = None
-
-try:
-    import pytesseract
-except Exception:  # pragma: no cover - optional dependency at runtime
-    pytesseract = None
-
-try:
-    from azure.ai.documentintelligence import DocumentIntelligenceClient
-    from azure.core.credentials import AzureKeyCredential
-except Exception:  # pragma: no cover - optional dependency at runtime
-    DocumentIntelligenceClient = None
-    AzureKeyCredential = None
+from decimal import Decimal, InvalidOperation
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 
+def _optional_import(module_name: str):
+    try:
+        return importlib.import_module(module_name)
+    except Exception:  # pragma: no cover - optional dependency at runtime
+        return None
+
+
+def _load_openpyxl():
+    return _optional_import("openpyxl")
+
+
+def _load_pdfplumber():
+    return _optional_import("pdfplumber")
+
+
+def _load_pdf2image_convert():
+    module = _optional_import("pdf2image")
+    return getattr(module, "convert_from_bytes", None) if module else None
+
+
+def _load_pytesseract():
+    return _optional_import("pytesseract")
+
+
+def _load_azure_document_client():
+    azure_doc_module = _optional_import("azure.ai.documentintelligence")
+    azure_core_module = _optional_import("azure.core.credentials")
+    if not azure_doc_module or not azure_core_module:
+        return None, None
+    return (
+        getattr(azure_doc_module, "DocumentIntelligenceClient", None),
+        getattr(azure_core_module, "AzureKeyCredential", None),
+    )
+
+
 class ExtractionService:
     """Handles PDF/Excel extraction and AI column mapping guessing."""
 
-    def extract(self, file_content: bytes, file_type: str, org_id: str) -> Dict[str, Any]:
+    PREVIEW_PDF_PAGE_LIMIT = 3
+    PREVIEW_ROW_LIMIT = 80
+
+    def extract(
+        self,
+        file_content: bytes,
+        file_type: str,
+        org_id: str,
+        preview_mode: bool = False,
+    ) -> Dict[str, Any]:
         """
         Extract data from file.
         PDFs use Azure AI Document Intelligence when configured.
         """
 
         if file_type == "pdf":
-            return self._extract_pdf(file_content, org_id)
+            return self._extract_pdf(file_content, org_id, preview_mode=preview_mode)
         elif file_type == "xlsx":
             return self._extract_xlsx(file_content, org_id)
         elif file_type == "csv":
@@ -58,15 +77,39 @@ class ExtractionService:
         else:
             raise ValueError(f"Unsupported file type: {file_type}")
 
-    def _extract_pdf(self, file_content: bytes, org_id: str) -> Dict[str, Any]:
+    def _extract_pdf(
+        self,
+        file_content: bytes,
+        org_id: str,
+        preview_mode: bool = False,
+    ) -> Dict[str, Any]:
         """
         Extract tables from PDF using Azure AI Document Intelligence.
 
         Requires AZURE_AI_KEY and AZURE_AI_ENDPOINT.
         """
+        if preview_mode:
+            fast_preview = self._extract_pdf_local(
+                file_content,
+                org_id,
+                max_pages=self.PREVIEW_PDF_PAGE_LIMIT,
+                row_limit=self.PREVIEW_ROW_LIMIT,
+            )
+            if fast_preview.get("raw_data"):
+                fast_preview["method"] = f"{fast_preview.get('method', 'pdf-local')}-preview"
+                return fast_preview
+            logger.info(
+                "Fast PDF preview returned no rows for org %s; retrying full extraction path",
+                org_id,
+            )
+
+        local_fallback = None
+
         if self._azure_configured():
             try:
-                return self._extract_pdf_azure(file_content, org_id)
+                azure_payload = self._extract_pdf_azure(file_content, org_id)
+                local_fallback = self._extract_pdf_local(file_content, org_id)
+                return self._pick_best_pdf_payload(azure_payload, local_fallback)
             except Exception as e:
                 logger.warning(
                     "Azure PDF extraction failed, falling back to local parser: %s",
@@ -76,6 +119,7 @@ class ExtractionService:
         return self._extract_pdf_local(file_content, org_id)
 
     def _extract_pdf_azure(self, file_content: bytes, org_id: str) -> Dict[str, Any]:
+        DocumentIntelligenceClient, AzureKeyCredential = _load_azure_document_client()
         if DocumentIntelligenceClient is None:
             raise ValueError("azure-ai-documentintelligence is required for PDF extraction")
 
@@ -103,7 +147,14 @@ class ExtractionService:
         payload["method"] = "azure"
         return payload
 
-    def _extract_pdf_local(self, file_content: bytes, org_id: str) -> Dict[str, Any]:
+    def _extract_pdf_local(
+        self,
+        file_content: bytes,
+        org_id: str,
+        max_pages: Optional[int] = None,
+        row_limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        pdfplumber = _load_pdfplumber()
         if pdfplumber is None:
             raise ValueError("pdfplumber is required for local PDF extraction")
 
@@ -113,7 +164,8 @@ class ExtractionService:
         text_rows: List[List[str]] = []
 
         with pdfplumber.open(BytesIO(file_content)) as pdf:
-            for page in pdf.pages:
+            pages = pdf.pages[:max_pages] if max_pages else pdf.pages
+            for page in pages:
                 page_tables: List[List[List[Any]]] = []
                 for settings in self._pdf_table_settings():
                     extracted = page.extract_tables(settings)
@@ -122,31 +174,52 @@ class ExtractionService:
 
                 if page_tables:
                     tables.extend(page_tables)
-                    continue
+                    if row_limit and self._estimated_table_rows(tables) >= row_limit:
+                        break
 
                 page_text = page.extract_text(x_tolerance=2, y_tolerance=2, layout=True) or ""
                 for line in page_text.splitlines():
                     line = line.strip()
                     if not line:
                         continue
-                    parts = [p.strip() for p in re.split(r"\s{2,}|\t", line) if p.strip()]
+                    parts = self._split_pdf_text_line(line)
                     if len(parts) >= 3:
                         text_rows.append(parts)
+                        if row_limit and len(text_rows) >= row_limit:
+                            break
+                if row_limit and len(text_rows) >= row_limit:
+                    break
 
         if tables:
             combined_rows = self._merge_local_tables(tables)
+            if text_rows:
+                combined_rows = self._merge_table_and_text_rows(
+                    combined_rows,
+                    text_rows,
+                )
             if combined_rows:
-                payload = self._rows_to_payload(combined_rows, confidence=72)
+                payload = self._rows_to_payload(
+                    self._limit_rows(combined_rows, row_limit),
+                    confidence=72,
+                )
                 payload["method"] = "pdfplumber-table"
                 return payload
 
         if text_rows:
-            payload = self._rows_to_payload(text_rows, confidence=60)
+            payload = self._rows_to_payload(
+                self._limit_rows(text_rows, row_limit),
+                confidence=60,
+            )
             payload["method"] = "pdfplumber-text"
             return payload
 
         if self._ocr_available():
-            ocr_payload = self._extract_pdf_ocr(file_content, org_id)
+            ocr_payload = self._extract_pdf_ocr(
+                file_content,
+                org_id,
+                max_pages=max_pages,
+                row_limit=row_limit,
+            )
             if ocr_payload["raw_data"]:
                 return ocr_payload
 
@@ -155,6 +228,7 @@ class ExtractionService:
 
     def _extract_xlsx(self, file_content: bytes, org_id: str) -> Dict[str, Any]:
         """Extract tables from Excel using openpyxl."""
+        openpyxl = _load_openpyxl()
         if openpyxl is None:
             raise ValueError("openpyxl is required for XLSX extraction")
 
@@ -166,18 +240,11 @@ class ExtractionService:
         if not rows:
             return {"raw_data": [], "column_headers": [], "confidence": 0}
 
-        first_row = list(rows[0])
-        has_header = self._looks_like_header(first_row)
-
-        if has_header:
-            column_headers = self._normalize_headers(first_row)
-            data_rows = rows[1:]
-        else:
-            column_headers = self._default_headers(len(first_row))
-            data_rows = rows
-
+        normalized_rows = [list(row) for row in rows if any(cell not in (None, "") for cell in row)]
+        column_headers, data_rows = self._split_rows_with_headers(normalized_rows)
         raw_data = [self._normalize_row(list(r), len(column_headers)) for r in data_rows]
         raw_data, column_headers = self._ensure_min_columns(raw_data, column_headers)
+        column_headers = self._refine_headers_from_samples(raw_data, column_headers)
 
         return {
             "raw_data": raw_data,
@@ -197,18 +264,10 @@ class ExtractionService:
         if not rows:
             return {"raw_data": [], "column_headers": [], "confidence": 0}
 
-        first_row = rows[0]
-        has_header = self._looks_like_header(first_row)
-
-        if has_header:
-            column_headers = self._normalize_headers(first_row)
-            data_rows = rows[1:]
-        else:
-            column_headers = self._default_headers(len(first_row))
-            data_rows = rows
-
+        column_headers, data_rows = self._split_rows_with_headers(rows)
         raw_data = [self._normalize_row(row, len(column_headers)) for row in data_rows]
         raw_data, column_headers = self._ensure_min_columns(raw_data, column_headers)
+        column_headers = self._refine_headers_from_samples(raw_data, column_headers)
 
         return {
             "raw_data": raw_data,
@@ -222,6 +281,7 @@ class ExtractionService:
         raw_data: List[List[str]],
         org_id: str,
         column_headers: Optional[List[str]] = None,
+        upload_source: Optional[str] = None,
     ) -> ColumnMapping:
         """
         Use LLM to guess which columns are Date, Narration, Reference, Amount.
@@ -233,118 +293,949 @@ class ExtractionService:
 
         For MVP: Use heuristics
         """
-        # TODO: Call GPT-4o-mini API for intelligent mapping
-
-        # Simple heuristics for MVP
         headers = column_headers or []
-        if headers:
-            lower = [str(h).strip() for h in headers]
+        if not headers and raw_data:
+            headers = self._default_headers(len(raw_data[0]))
 
-            date_header = self._match_header(lower, ["date", "dt"]) or headers[0]
-            narration_header = self._match_header(
-                lower, ["narr", "desc", "details", "memo", "particular"]
-            ) or headers[1 if len(headers) > 1 else 0]
-            reference_header = self._match_header(
-                lower, ["ref", "reference", "cheque", "check", "chq", "invoice"]
-            ) or headers[2 if len(headers) > 2 else 0]
-
-            amount_header = self._match_header(
-                lower, ["amount", "amt", "value", "transaction amount", "txn amount"]
-            )
-            debit_header = self._match_header(
-                lower, ["debit", "dr", "withdrawal", "withdraw", "paid out", "payment", "charge"]
-            )
-            credit_header = self._match_header(
-                lower, ["credit", "cr", "deposit", "paid in", "receipt", "received"]
-            )
-
-            if not amount_header and not (debit_header or credit_header):
-                amount_header = headers[3 if len(headers) > 3 else 0]
-
-            mapping = ColumnMapping(
-                date=date_header,
-                narration=narration_header,
-                reference=reference_header,
-                amount=amount_header,
-                debit=debit_header,
-                credit=credit_header,
-            )
-            return mapping
-
-        if not raw_data or len(raw_data[0]) < 4:
+        if not raw_data or len(headers) < 4:
             raise ValueError("Need at least 4 columns")
 
+        header_labels = [str(h).strip() for h in headers]
+
+        if upload_source in {"bank", "book"}:
+            statement_mapping = self._guess_bank_statement_mapping(header_labels, raw_data)
+            if statement_mapping:
+                return statement_mapping
+
+        date_header = self._match_header(
+            header_labels,
+            ["date", "dt", "value date", "posting date", "transaction date"],
+        )
+        narration_header = self._match_header(
+            header_labels,
+            [
+                "narr",
+                "desc",
+                "details",
+                "memo",
+                "particular",
+                "transaction description",
+                "description",
+            ],
+        )
+        reference_header = self._match_header(
+            header_labels,
+            ["ref", "reference", "cheque", "check", "chq", "invoice", "document"],
+        )
+        debit_header = self._match_header(
+            header_labels,
+            ["debit", "dr", "withdrawal", "withdraw", "paid out", "payment", "charge"],
+        )
+        credit_header = self._match_header(
+            header_labels,
+            ["credit", "cr", "deposit", "paid in", "receipt", "received"],
+        )
+
+        used_headers = {
+            header
+            for header in [date_header, narration_header, reference_header, debit_header, credit_header]
+            if header
+        }
+
+        best_date = self._best_header_by_rule(
+            header_labels,
+            raw_data,
+            self._value_looks_like_date,
+        )
+        if not date_header:
+            date_header = best_date or header_labels[0]
+
+        if date_header:
+            used_headers.add(date_header)
+
+        if not reference_header:
+            reference_header = self._best_header_by_rule(
+                header_labels,
+                raw_data,
+                self._value_looks_like_reference,
+                exclude={date_header} if date_header else set(),
+            )
+
+        if not narration_header:
+            narration_header = self._best_header_by_rule(
+                header_labels,
+                raw_data,
+                self._value_looks_like_narration,
+                exclude={date_header, reference_header} - {None},
+            )
+
+        inferred_debit, inferred_credit = self._infer_debit_credit_headers(
+            header_labels,
+            raw_data,
+            debit_header=debit_header,
+            credit_header=credit_header,
+        )
+        debit_header = debit_header or inferred_debit
+        credit_header = credit_header or inferred_credit
+
+        distinct_headers = set()
+
+        def _assign_unique(primary: Optional[str], fallback_rule, fallback_default: str) -> str:
+            candidate = primary
+            if candidate and candidate not in distinct_headers:
+                distinct_headers.add(candidate)
+                return candidate
+
+            fallback = self._best_header_by_rule(
+                header_labels,
+                raw_data,
+                fallback_rule,
+                exclude=distinct_headers,
+            )
+            if fallback and fallback not in distinct_headers:
+                distinct_headers.add(fallback)
+                return fallback
+
+            for header in header_labels:
+                if header not in distinct_headers:
+                    distinct_headers.add(header)
+                    return header
+            return fallback_default
+
+        date_header = _assign_unique(date_header, self._value_looks_like_date, header_labels[0])
+        reference_header = _assign_unique(
+            reference_header,
+            self._value_looks_like_reference,
+            header_labels[1 if len(header_labels) > 1 else 0],
+        )
+        narration_header = _assign_unique(
+            narration_header,
+            self._value_looks_like_narration,
+            header_labels[2 if len(header_labels) > 2 else 0],
+        )
+
+        remaining_amount_headers = [
+            header for header in header_labels if header not in {date_header, reference_header, narration_header}
+        ]
+        if not debit_header and remaining_amount_headers:
+            debit_header = remaining_amount_headers[0]
+        if not credit_header:
+            for header in remaining_amount_headers:
+                if header != debit_header:
+                    credit_header = header
+                    break
+
         return ColumnMapping(
-            date="Date",
-            narration="Description",
-            reference="Reference",
-            amount="Amount",
-            debit=None,
-            credit=None,
+            date=date_header,
+            narration=narration_header,
+            reference=reference_header,
+            amount=None,
+            debit=debit_header,
+            credit=credit_header,
+        )
+
+    def _guess_bank_statement_mapping(
+        self,
+        headers: List[str],
+        raw_data: List[List[Any]],
+    ) -> Optional[ColumnMapping]:
+        if not headers or not raw_data:
+            return None
+
+        bank_sample_size = None
+        sparse_amount_threshold = 0.02
+
+        date_keywords = ["date", "value date", "posting date", "transaction date", "dt"]
+        reference_keywords = ["reference", "ref", "cheque", "check", "chq", "document", "txn ref"]
+        narration_keywords = [
+            "description",
+            "transaction description",
+            "narration",
+            "narrative",
+            "details",
+            "memo",
+            "particular",
+            "particulars",
+        ]
+        debit_keywords = ["debit", "dr", "withdrawal", "withdraw", "paid out", "payment", "charge"]
+        credit_keywords = ["credit", "cr", "deposit", "paid in", "receipt", "received"]
+
+        date_idx = self._find_explicit_header_index(headers, date_keywords)
+        date_idx = self._best_header_index_for_field(
+            headers=headers,
+            raw_data=raw_data,
+            header_keywords=date_keywords,
+            sample_rule=self._value_looks_like_date,
+            sample_size=bank_sample_size,
+            non_empty_threshold=0.05,
+        ) if date_idx is None else date_idx
+        if date_idx is None:
+            return None
+
+        used_indices = {date_idx}
+
+        reference_idx = self._find_explicit_header_index(
+            headers,
+            reference_keywords,
+            exclude=used_indices,
+        )
+        narration_idx = self._find_explicit_header_index(
+            headers,
+            narration_keywords,
+            exclude=used_indices,
+        )
+        explicit_debit_idx = self._find_explicit_header_index(
+            headers,
+            debit_keywords,
+            exclude=used_indices,
+        )
+        explicit_credit_idx = self._find_explicit_header_index(
+            headers,
+            credit_keywords,
+            exclude=used_indices | ({explicit_debit_idx} if explicit_debit_idx is not None else set()),
+        )
+
+        explicit_debit_header = headers[explicit_debit_idx] if explicit_debit_idx is not None else None
+        explicit_credit_header = headers[explicit_credit_idx] if explicit_credit_idx is not None else None
+        debit_header, credit_header = self._infer_debit_credit_headers(
+            headers,
+            raw_data,
+            debit_header=explicit_debit_header,
+            credit_header=explicit_credit_header,
+            sample_size=bank_sample_size,
+            non_empty_threshold=sparse_amount_threshold,
+        )
+        debit_idx = headers.index(debit_header) if debit_header in headers else None
+        credit_idx = headers.index(credit_header) if credit_header in headers else None
+
+        if debit_idx is not None:
+            used_indices.add(debit_idx)
+        if credit_idx is not None:
+            used_indices.add(credit_idx)
+
+        if reference_idx is None:
+            reference_idx = self._best_header_index_for_field(
+                headers=headers,
+                raw_data=raw_data,
+                header_keywords=reference_keywords,
+                sample_rule=self._value_looks_like_reference,
+                exclude=used_indices,
+                sample_size=bank_sample_size,
+                non_empty_threshold=0.05,
+            )
+        if reference_idx is not None:
+            used_indices.add(reference_idx)
+
+        if narration_idx is None:
+            narration_idx = self._best_header_index_for_field(
+                headers=headers,
+                raw_data=raw_data,
+                header_keywords=narration_keywords,
+                sample_rule=self._value_looks_like_narration,
+                exclude=used_indices,
+                sample_size=bank_sample_size,
+                non_empty_threshold=0.05,
+            )
+
+        if narration_idx is None:
+            narration_idx = self._best_header_index_for_field(
+                headers=headers,
+                raw_data=raw_data,
+                header_keywords=["description", "narration", "details", "memo"],
+                sample_rule=self._value_looks_like_narration,
+                sample_size=bank_sample_size,
+                non_empty_threshold=0.05,
+            )
+            if narration_idx in {date_idx, reference_idx, debit_idx, credit_idx}:
+                narration_idx = None
+
+        if narration_idx is None:
+            return None
+
+        if reference_idx is None:
+            reference_idx = self._best_header_index_for_field(
+                headers=headers,
+                raw_data=raw_data,
+                header_keywords=["reference", "ref", "document"],
+                sample_rule=self._value_looks_like_reference,
+                exclude={date_idx, narration_idx, debit_idx, credit_idx} - {None},
+                sample_size=bank_sample_size,
+                non_empty_threshold=0.05,
+            )
+
+        if debit_idx is None or credit_idx is None:
+            amount_candidates = self._rank_amount_columns(
+                headers,
+                raw_data,
+                exclude={date_idx, narration_idx, reference_idx} - {None},
+                sample_size=bank_sample_size,
+                non_empty_threshold=sparse_amount_threshold,
+            )
+            if debit_idx is None and amount_candidates:
+                debit_idx = amount_candidates[0]
+            if credit_idx is None:
+                for candidate_idx in amount_candidates:
+                    if candidate_idx != debit_idx:
+                        credit_idx = candidate_idx
+                        break
+
+        indices = [date_idx, narration_idx, reference_idx, debit_idx, credit_idx]
+        if any(idx is None for idx in indices):
+            return None
+        if len(set(indices)) != len(indices):
+            return None
+
+        return ColumnMapping(
+            date=headers[date_idx],
+            narration=headers[narration_idx],
+            reference=headers[reference_idx],
+            amount=None,
+            debit=headers[debit_idx],
+            credit=headers[credit_idx],
         )
 
     def _match_header(self, headers: List[str], keywords: List[str]) -> Optional[str]:
         for header in headers:
-            h = header.lower()
-            if any(k in h for k in keywords):
+            h = header.lower().strip()
+            normalized = re.sub(r"[^a-z0-9]+", " ", h)
+            tokens = {token for token in normalized.split() if token}
+            if any(
+                keyword in tokens if len(keyword) <= 2 else keyword in h
+                for keyword in keywords
+            ):
                 return header
         return None
 
+    def _header_keyword_score(self, header: str, keywords: List[str]) -> float:
+        h = header.lower().strip()
+        normalized = re.sub(r"[^a-z0-9]+", " ", h)
+        tokens = {token for token in normalized.split() if token}
+        score = 0.0
+
+        for keyword in keywords:
+            keyword = keyword.lower().strip()
+            if not keyword:
+                continue
+            if len(keyword) <= 2:
+                if keyword in tokens:
+                    score = max(score, 1.0)
+            elif keyword == h:
+                score = max(score, 1.0)
+            elif keyword in h:
+                score = max(score, 0.8)
+
+        return score
+
+    def _best_header_index_for_field(
+        self,
+        headers: List[str],
+        raw_data: List[List[Any]],
+        header_keywords: List[str],
+        sample_rule,
+        exclude: Optional[set[int]] = None,
+        sample_size: Optional[int] = 12,
+        non_empty_threshold: float = 0.15,
+    ) -> Optional[int]:
+        exclude = exclude or set()
+        best_idx = None
+        best_score = -1.0
+
+        for idx, header in enumerate(headers):
+            if idx in exclude:
+                continue
+
+            sample_score = self._column_fit_score(
+                raw_data,
+                idx,
+                sample_rule,
+                sample_size=sample_size,
+            )
+            non_empty_ratio = self._column_non_empty_ratio(
+                raw_data,
+                idx,
+                sample_size=sample_size,
+            )
+            keyword_score = self._header_keyword_score(header, header_keywords)
+            combined = (sample_score * 0.72) + (keyword_score * 0.28)
+
+            if sample_score < 0.2 and keyword_score < 0.8:
+                continue
+            if non_empty_ratio < non_empty_threshold:
+                continue
+
+            if combined > best_score:
+                best_idx = idx
+                best_score = combined
+
+        return best_idx
+
+    def _rank_amount_columns(
+        self,
+        headers: List[str],
+        raw_data: List[List[Any]],
+        exclude: Optional[set[int]] = None,
+        sample_size: Optional[int] = 12,
+        non_empty_threshold: float = 0.15,
+    ) -> List[int]:
+        exclude = exclude or set()
+        ranked: List[tuple[int, float]] = []
+        for idx, header in enumerate(headers):
+            if idx in exclude:
+                continue
+            if "balance" in header.lower():
+                continue
+            amount_score = self._column_fit_score(
+                raw_data,
+                idx,
+                self._value_looks_like_amount,
+                sample_size=sample_size,
+            )
+            non_empty_ratio = self._column_non_empty_ratio(
+                raw_data,
+                idx,
+                sample_size=sample_size,
+            )
+            if amount_score < 0.6 or non_empty_ratio < non_empty_threshold:
+                continue
+            ranked.append((idx, (amount_score * 0.75) + (non_empty_ratio * 0.25)))
+
+        ranked.sort(key=lambda item: (-item[1], item[0]))
+        return [idx for idx, _ in ranked]
+
+    def _best_header_by_rule(
+        self,
+        headers: List[str],
+        raw_data: List[List[Any]],
+        rule,
+        exclude: Optional[set[str]] = None,
+    ) -> Optional[str]:
+        exclude = exclude or set()
+        best_header = None
+        best_score = -1.0
+
+        for idx, header in enumerate(headers):
+            if header in exclude:
+                continue
+            score = self._column_fit_score(raw_data, idx, rule)
+            if score > best_score:
+                best_header = header
+                best_score = score
+
+        return best_header
+
+    def _column_fit_score(
+        self,
+        raw_data: List[List[Any]],
+        column_idx: int,
+        rule,
+        sample_size: Optional[int] = 12,
+    ) -> float:
+        values = []
+        for row in self._sample_rows(raw_data, sample_size):
+            if column_idx >= len(row):
+                continue
+            value = row[column_idx]
+            if value is None or str(value).strip() == "":
+                continue
+            values.append(value)
+
+        if not values:
+            return 0.0
+
+        passed = sum(1 for value in values if rule(value))
+        return passed / len(values)
+
+    def _sample_rows(
+        self,
+        raw_data: List[List[Any]],
+        sample_size: Optional[int] = 12,
+    ) -> List[List[Any]]:
+        if sample_size is None or sample_size <= 0:
+            return raw_data
+        return raw_data[:sample_size]
+
+    def _infer_debit_credit_headers(
+        self,
+        headers: List[str],
+        raw_data: List[List[Any]],
+        debit_header: Optional[str] = None,
+        credit_header: Optional[str] = None,
+        sample_size: Optional[int] = 12,
+        non_empty_threshold: float = 0.15,
+    ) -> tuple[Optional[str], Optional[str]]:
+        if debit_header and credit_header:
+            return debit_header, credit_header
+
+        explicit_headers = {header for header in [debit_header, credit_header] if header}
+        amount_candidates = []
+
+        for idx, header in enumerate(headers):
+            amount_ratio = self._column_fit_score(
+                raw_data,
+                idx,
+                self._value_looks_like_amount,
+                sample_size=sample_size,
+            )
+            non_empty_ratio = self._column_non_empty_ratio(
+                raw_data,
+                idx,
+                sample_size=sample_size,
+            )
+            if header not in explicit_headers and (
+                amount_ratio < 0.6 or non_empty_ratio < non_empty_threshold
+            ):
+                continue
+            amount_candidates.append(
+                {
+                    "idx": idx,
+                    "header": header,
+                    "amount_ratio": amount_ratio,
+                    "non_empty_ratio": non_empty_ratio,
+                }
+            )
+
+        balance_header = self._match_header(headers, ["balance", "running balance", "available balance"])
+        if balance_header:
+            amount_candidates = [
+                candidate
+                for candidate in amount_candidates
+                if candidate["header"] != balance_header
+            ]
+
+        if len(amount_candidates) > 2:
+            densest = max(amount_candidates, key=lambda candidate: candidate["non_empty_ratio"])
+            if densest["non_empty_ratio"] >= 0.85 and densest["header"] not in explicit_headers:
+                amount_candidates = [
+                    candidate for candidate in amount_candidates if candidate["header"] != densest["header"]
+                ]
+
+        if debit_header and not credit_header:
+            debit_candidate = next(
+                (candidate for candidate in amount_candidates if candidate["header"] == debit_header),
+                None,
+            )
+            if debit_candidate:
+                best_credit = None
+                best_score = -1.0
+                for candidate in amount_candidates:
+                    if candidate["header"] == debit_header:
+                        continue
+                    exclusivity = self._pair_exclusivity_score(
+                        raw_data,
+                        debit_candidate["idx"],
+                        candidate["idx"],
+                        sample_size=sample_size,
+                    )
+                    coverage = self._pair_coverage_score(
+                        raw_data,
+                        debit_candidate["idx"],
+                        candidate["idx"],
+                        sample_size=sample_size,
+                    )
+                    score = (exclusivity * 0.7) + (coverage * 0.3)
+                    if score > best_score:
+                        best_credit = candidate["header"]
+                        best_score = score
+                if best_credit:
+                    return debit_header, best_credit
+
+        if credit_header and not debit_header:
+            credit_candidate = next(
+                (candidate for candidate in amount_candidates if candidate["header"] == credit_header),
+                None,
+            )
+            if credit_candidate:
+                best_debit = None
+                best_score = -1.0
+                for candidate in amount_candidates:
+                    if candidate["header"] == credit_header:
+                        continue
+                    exclusivity = self._pair_exclusivity_score(
+                        raw_data,
+                        candidate["idx"],
+                        credit_candidate["idx"],
+                        sample_size=sample_size,
+                    )
+                    coverage = self._pair_coverage_score(
+                        raw_data,
+                        candidate["idx"],
+                        credit_candidate["idx"],
+                        sample_size=sample_size,
+                    )
+                    score = (exclusivity * 0.7) + (coverage * 0.3)
+                    if score > best_score:
+                        best_debit = candidate["header"]
+                        best_score = score
+                if best_debit:
+                    return best_debit, credit_header
+
+        if len(amount_candidates) >= 2:
+            best_pair = None
+            best_score = -1.0
+
+            for left_idx in range(len(amount_candidates)):
+                for right_idx in range(left_idx + 1, len(amount_candidates)):
+                    left = amount_candidates[left_idx]
+                    right = amount_candidates[right_idx]
+                    exclusivity = self._pair_exclusivity_score(
+                        raw_data,
+                        left["idx"],
+                        right["idx"],
+                        sample_size=sample_size,
+                    )
+                    coverage = self._pair_coverage_score(
+                        raw_data,
+                        left["idx"],
+                        right["idx"],
+                        sample_size=sample_size,
+                    )
+                    order_bonus = 0.05 if left["idx"] < right["idx"] else 0
+                    score = (exclusivity * 0.7) + (coverage * 0.3) + order_bonus
+                    if score > best_score:
+                        best_score = score
+                        best_pair = (left, right)
+
+            if best_pair:
+                left, right = best_pair
+                return debit_header or left["header"], credit_header or right["header"]
+
+        if not debit_header and amount_candidates:
+            debit_header = sorted(amount_candidates, key=lambda candidate: candidate["idx"])[0]["header"]
+
+        if not credit_header:
+            for candidate in sorted(amount_candidates, key=lambda item: item["idx"]):
+                if candidate["header"] != debit_header:
+                    credit_header = candidate["header"]
+                    break
+
+        return debit_header, credit_header
+
+    def _column_non_empty_ratio(
+        self,
+        raw_data: List[List[Any]],
+        column_idx: int,
+        sample_size: Optional[int] = 12,
+    ) -> float:
+        sample_rows = self._sample_rows(raw_data, sample_size)
+        if not sample_rows:
+            return 0.0
+
+        filled = 0
+        total = 0
+        for row in sample_rows:
+            if column_idx >= len(row):
+                continue
+            total += 1
+            if row[column_idx] is not None and str(row[column_idx]).strip() != "":
+                filled += 1
+
+        return (filled / total) if total else 0.0
+
+    def _pair_exclusivity_score(
+        self,
+        raw_data: List[List[Any]],
+        left_idx: int,
+        right_idx: int,
+        sample_size: Optional[int] = 12,
+    ) -> float:
+        sample_rows = self._sample_rows(raw_data, sample_size)
+        if not sample_rows:
+            return 0.0
+
+        exclusive_rows = 0
+        considered_rows = 0
+        for row in sample_rows:
+            left_has = left_idx < len(row) and row[left_idx] not in (None, "")
+            right_has = right_idx < len(row) and row[right_idx] not in (None, "")
+            if not left_has and not right_has:
+                continue
+            considered_rows += 1
+            if left_has ^ right_has:
+                exclusive_rows += 1
+
+        return (exclusive_rows / considered_rows) if considered_rows else 0.0
+
+    def _pair_coverage_score(
+        self,
+        raw_data: List[List[Any]],
+        left_idx: int,
+        right_idx: int,
+        sample_size: Optional[int] = 12,
+    ) -> float:
+        sample_rows = self._sample_rows(raw_data, sample_size)
+        if not sample_rows:
+            return 0.0
+
+        covered_rows = 0
+        for row in sample_rows:
+            left_has = left_idx < len(row) and row[left_idx] not in (None, "")
+            right_has = right_idx < len(row) and row[right_idx] not in (None, "")
+            if left_has or right_has:
+                covered_rows += 1
+
+        return covered_rows / len(sample_rows)
+
+    def _find_explicit_header_index(
+        self,
+        headers: List[str],
+        aliases: List[str],
+        exclude: Optional[set[int]] = None,
+    ) -> Optional[int]:
+        exclude = exclude or set()
+        best_idx = None
+        best_score = -1.0
+
+        for idx, header in enumerate(headers):
+            if idx in exclude:
+                continue
+            score = self._header_keyword_score(header, aliases)
+            if score > best_score:
+                best_idx = idx
+                best_score = score
+
+        if best_score >= 0.8:
+            return best_idx
+        return None
+
     def _looks_like_header(self, row: List[Any]) -> bool:
+        return self._header_score(row) >= 4 and not self._looks_like_data_row(row)
+
+    def _normalize_headers(self, headers: List[Any]) -> List[str]:
+        normalized = []
+        seen: Dict[str, int] = {}
+        for idx, h in enumerate(headers):
+            if h is None or str(h).strip() == "":
+                base = f"Col_{idx + 1}"
+            else:
+                base = self._canonicalize_header_name(str(h).strip(), idx)
+
+            key = base.lower()
+            count = seen.get(key, 0)
+            seen[key] = count + 1
+            normalized.append(base if count == 0 else f"{base}_{count + 1}")
+        return normalized
+
+    def _default_headers(self, count: int) -> List[str]:
+        return [f"Col_{i + 1}" for i in range(count)]
+
+    def _split_rows_with_headers(
+        self,
+        rows: List[List[Any]],
+    ) -> tuple[List[str], List[List[Any]]]:
+        if not rows:
+            return [], []
+
+        width = max((len(row) for row in rows), default=0)
+        normalized_rows = [self._normalize_row(list(row), width) for row in rows]
+
+        header_index = None
+        best_score = 0
+        search_limit = min(len(normalized_rows), 5)
+
+        for idx in range(search_limit):
+            row = normalized_rows[idx]
+            score = self._header_score(row)
+            if self._looks_like_data_row(row):
+                score -= 4
+            if idx + 1 < len(normalized_rows) and self._looks_like_data_row(normalized_rows[idx + 1]):
+                score += 2
+            if score > best_score:
+                best_score = score
+                header_index = idx
+
+        if header_index is not None and best_score >= 4:
+            start = header_index
+            end = header_index
+
+            while (
+                start > 0
+                and self._header_score(normalized_rows[start - 1]) >= 3
+                and not self._looks_like_data_row(normalized_rows[start - 1])
+            ):
+                start -= 1
+            while (
+                end + 1 < search_limit
+                and self._header_score(normalized_rows[end + 1]) >= 3
+                and not self._looks_like_data_row(normalized_rows[end + 1])
+            ):
+                end += 1
+
+            merged_header = self._merge_header_rows(normalized_rows[start : end + 1], width)
+            column_headers = self._normalize_headers(merged_header)
+            return column_headers, normalized_rows[end + 1 :]
+
+        return self._default_headers(width), normalized_rows
+
+    def _merge_header_rows(self, header_rows: List[List[Any]], width: int) -> List[str]:
+        merged: List[str] = []
+        for column_idx in range(width):
+            parts: List[str] = []
+            for row in header_rows:
+                if column_idx >= len(row):
+                    continue
+                text = str(row[column_idx]).strip() if row[column_idx] is not None else ""
+                if not text:
+                    continue
+                if re.match(r"^-+$", text):
+                    continue
+                if not parts or parts[-1].lower() != text.lower():
+                    parts.append(text)
+            merged.append(" ".join(parts).strip())
+        return merged
+
+    def _canonicalize_header_name(self, header: str, idx: int) -> str:
+        text = re.sub(r"\s+", " ", header).strip()
+        if not text:
+            return f"Col_{idx + 1}"
+
+        lowered = text.lower()
+        alias_map = [
+            (["transaction date", "trans date", "value date", "posting date", "date", "dt"], "Date"),
+            (
+                [
+                    "transaction description",
+                    "description",
+                    "narration",
+                    "narrative",
+                    "details",
+                    "memo",
+                    "particular",
+                    "particulars",
+                ],
+                "Description",
+            ),
+            (["reference", "ref", "cheque", "check", "chq", "document"], "Reference"),
+            (["debit", "dr"], "Debit"),
+            (["credit", "cr"], "Credit"),
+            (["balance", "running balance", "available balance"], "Balance"),
+        ]
+
+        for candidates, normalized in alias_map:
+            if any(candidate == lowered or candidate in lowered for candidate in candidates):
+                return normalized
+
+        if re.match(r"^col[_ ]?\d+$", lowered):
+            return f"Col_{idx + 1}"
+
+        return text
+
+    def _header_score(self, row: List[Any]) -> int:
         if not row:
-            return False
+            return 0
+
+        score = 0
         non_empty = [cell for cell in row if cell not in (None, "")]
         if not non_empty:
-            return False
+            return 0
 
         header_keywords = [
             "date",
             "dt",
-            "desc",
             "description",
+            "desc",
             "narr",
-            "narration",
             "details",
             "memo",
             "particular",
             "reference",
             "ref",
-            "check",
-            "cheque",
-            "chq",
-            "amount",
-            "amt",
             "debit",
             "credit",
             "balance",
+            "dr",
+            "cr",
         ]
 
-        normalized = [str(cell).strip().lower() for cell in non_empty]
-        for cell in normalized:
-            if any(keyword in cell for keyword in header_keywords):
-                return True
-        # Fallback heuristic: mostly strings implies header
-        stringish = 0
         for cell in non_empty:
-            if isinstance(cell, str):
-                stringish += 1
-            elif isinstance(cell, (datetime, date)):
+            text = str(cell).strip().lower()
+            if not text:
                 continue
-            else:
-                continue
-        return stringish >= max(2, len(non_empty) // 2)
 
-    def _normalize_headers(self, headers: List[Any]) -> List[str]:
-        normalized = []
-        for idx, h in enumerate(headers):
-            if h is None or str(h).strip() == "":
-                normalized.append(f"Col_{idx + 1}")
-            else:
-                normalized.append(str(h).strip())
-        return normalized
+            normalized = re.sub(r"[^a-z0-9]+", " ", text)
+            tokens = {token for token in normalized.split() if token}
 
-    def _default_headers(self, count: int) -> List[str]:
-        return [f"Col_{i + 1}" for i in range(count)]
+            for keyword in header_keywords:
+                if (len(keyword) <= 2 and keyword in tokens) or keyword in text:
+                    score += 3
+                    break
+
+            if re.match(r"^col[_ ]?\d+$", text):
+                score -= 2
+            elif self._value_looks_like_amount(text):
+                score -= 2
+            elif self._value_looks_like_date(text):
+                score -= 1
+            elif re.search(r"[a-z]", text):
+                score += 1
+
+        if len(non_empty) >= 3:
+            score += 1
+
+        return score
+
+    def _looks_like_data_row(self, row: List[Any]) -> bool:
+        non_empty = [cell for cell in row if cell not in (None, "")]
+        if not non_empty:
+            return False
+
+        date_hits = sum(1 for cell in non_empty if self._value_looks_like_date(cell))
+        amount_hits = sum(1 for cell in non_empty if self._value_looks_like_amount(cell))
+        ref_hits = sum(1 for cell in non_empty if self._value_looks_like_reference(cell))
+        narration_hits = sum(1 for cell in non_empty if self._value_looks_like_narration(cell))
+
+        return (
+            (date_hits >= 1 and amount_hits >= 1)
+            or amount_hits >= 2
+            or (date_hits >= 1 and ref_hits >= 1)
+            or (date_hits >= 1 and narration_hits >= 1)
+        )
+
+    def _value_looks_like_date(self, value: Any) -> bool:
+        if value in (None, ""):
+            return False
+        text = str(value).strip()
+        if not text:
+            return False
+        if re.match(r"^\d{4}[/-]\d{1,2}[/-]\d{1,2}$", text):
+            return True
+        if re.match(r"^\d{1,2}[/-]\d{1,2}[/-]\d{2,4}$", text):
+            return True
+        try:
+            datetime.fromisoformat(text)
+            return True
+        except ValueError:
+            return False
+
+    def _value_looks_like_amount(self, value: Any) -> bool:
+        if value in (None, ""):
+            return False
+        text = str(value).strip()
+        if not text:
+            return False
+        cleaned = re.sub(r"[A-Za-z]", "", text)
+        cleaned = cleaned.replace(",", "").replace("$", "").replace(" ", "")
+        if cleaned.startswith("(") and cleaned.endswith(")"):
+            cleaned = f"-{cleaned[1:-1]}"
+        return bool(re.match(r"^-?\d+(\.\d{1,2})?$", cleaned))
+
+    def _value_looks_like_reference(self, value: Any) -> bool:
+        if value in (None, ""):
+            return False
+        text = re.sub(r"[^A-Za-z0-9]", "", str(value).strip())
+        if len(text) < 4:
+            return False
+        return bool(re.search(r"[A-Za-z]", text) and re.search(r"\d", text))
+
+    def _value_looks_like_narration(self, value: Any) -> bool:
+        if value in (None, ""):
+            return False
+        text = str(value).strip()
+        if len(text) < 6:
+            return False
+        letters = len(re.findall(r"[A-Za-z]", text))
+        digits = len(re.findall(r"\d", text))
+        spaces = len(re.findall(r"\s", text))
+        return letters >= 4 and letters > digits and spaces >= 1
 
     def _normalize_row(self, row: List[Any], width: int) -> List[Any]:
         # Pad or trim to match headers
@@ -368,7 +1259,121 @@ class ExtractionService:
         padded_rows = [self._normalize_row(row, len(column_headers)) for row in raw_data]
         return padded_rows, column_headers
 
+    def _refine_headers_from_samples(
+        self,
+        raw_data: List[List[Any]],
+        column_headers: List[str],
+    ) -> List[str]:
+        if not raw_data or not column_headers:
+            return column_headers
+
+        refined = list(column_headers)
+
+        def _best_idx(rule, exclude: Optional[set[int]] = None) -> Optional[int]:
+            exclude = exclude or set()
+            best_idx = None
+            best_score = -1.0
+            for idx in range(len(refined)):
+                if idx in exclude:
+                    continue
+                score = self._column_fit_score(raw_data, idx, rule, sample_size=None)
+                if score > best_score:
+                    best_idx = idx
+                    best_score = score
+            return best_idx
+
+        def _score(idx: Optional[int], rule) -> float:
+            if idx is None:
+                return 0.0
+            return self._column_fit_score(raw_data, idx, rule, sample_size=None)
+
+        used_indices: set[int] = set()
+
+        date_idx = _best_idx(self._value_looks_like_date)
+        if _score(date_idx, self._value_looks_like_date) >= 0.75:
+            refined[date_idx] = "Date"
+            used_indices.add(date_idx)
+
+        reference_idx = _best_idx(self._value_looks_like_reference, exclude=used_indices)
+        if _score(reference_idx, self._value_looks_like_reference) >= 0.45:
+            refined[reference_idx] = "Reference"
+            used_indices.add(reference_idx)
+
+        narration_idx = _best_idx(self._value_looks_like_narration, exclude=used_indices)
+        if _score(narration_idx, self._value_looks_like_narration) >= 0.45:
+            refined[narration_idx] = "Description"
+            used_indices.add(narration_idx)
+
+        debit_header, credit_header = self._infer_debit_credit_headers(
+            refined,
+            raw_data,
+            sample_size=None,
+            non_empty_threshold=0.02,
+        )
+        amount_roles = [("Debit", debit_header), ("Credit", credit_header)]
+
+        for normalized_name, header in amount_roles:
+            if not header:
+                continue
+            try:
+                idx = refined.index(header)
+            except ValueError:
+                continue
+
+            amount_score = self._column_fit_score(
+                raw_data,
+                idx,
+                self._value_looks_like_amount,
+                sample_size=None,
+            )
+            non_empty_ratio = self._column_non_empty_ratio(
+                raw_data,
+                idx,
+                sample_size=None,
+            )
+            if amount_score >= 0.6 and non_empty_ratio >= 0.02:
+                refined[idx] = normalized_name
+                used_indices.add(idx)
+
+        balance_idx = None
+        for idx, header in enumerate(refined):
+            normalized = header.lower().strip()
+            if "balance" in normalized:
+                balance_idx = idx
+                break
+
+        if balance_idx is None:
+            remaining_amount_candidates: List[tuple[int, float, float]] = []
+            for idx in range(len(refined)):
+                if idx in used_indices:
+                    continue
+                amount_score = self._column_fit_score(
+                    raw_data,
+                    idx,
+                    self._value_looks_like_amount,
+                    sample_size=None,
+                )
+                non_empty_ratio = self._column_non_empty_ratio(
+                    raw_data,
+                    idx,
+                    sample_size=None,
+                )
+                if amount_score >= 0.7 and non_empty_ratio >= 0.6:
+                    remaining_amount_candidates.append((idx, amount_score, non_empty_ratio))
+
+            if remaining_amount_candidates:
+                balance_idx = max(
+                    remaining_amount_candidates,
+                    key=lambda item: (item[2], item[1]),
+                )[0]
+
+        if balance_idx is not None:
+            refined[balance_idx] = "Balance"
+
+        return self._normalize_headers(refined)
+
     def _azure_configured(self) -> bool:
+        DocumentIntelligenceClient, AzureKeyCredential = _load_azure_document_client()
         if DocumentIntelligenceClient is None or AzureKeyCredential is None:
             return False
         if not settings.AZURE_AI_KEY or not settings.AZURE_AI_ENDPOINT:
@@ -380,7 +1385,7 @@ class ExtractionService:
         return True
 
     def _ocr_available(self) -> bool:
-        return convert_from_bytes is not None and pytesseract is not None
+        return _load_pdf2image_convert() is not None and _load_pytesseract() is not None
 
     def _table_to_matrix(self, table: Any) -> List[List[str]]:
         row_count = table.row_count or 0
@@ -462,9 +1467,12 @@ class ExtractionService:
             row_count = len(table)
             return row_count * col_count
 
+        def _table_width(table: List[List[Any]]) -> int:
+            return max((len(r) for r in table), default=0)
+
         tables_sorted = sorted(tables, key=_table_score, reverse=True)
         primary = tables_sorted[0]
-        target_cols = max((len(r) for r in primary), default=0)
+        target_cols = max((_table_width(t) for t in tables), default=0)
 
         def _normalize_table(table: List[List[Any]], width: int) -> List[List[str]]:
             rows = []
@@ -477,10 +1485,8 @@ class ExtractionService:
                 rows.append(normalized)
             return [r for r in rows if any(cell for cell in r)]
 
-        merge_candidates = [t for t in tables if max((len(r) for r in t), default=0) == target_cols]
-
         combined_rows: List[List[str]] = []
-        for idx, table in enumerate(merge_candidates):
+        for idx, table in enumerate(tables_sorted):
             matrix = _normalize_table(table, target_cols)
             if not matrix:
                 continue
@@ -500,7 +1506,114 @@ class ExtractionService:
 
         return combined_rows
 
-    def _extract_pdf_ocr(self, file_content: bytes, org_id: str) -> Dict[str, Any]:
+    def _merge_table_and_text_rows(
+        self,
+        table_rows: List[List[str]],
+        text_rows: List[List[str]],
+    ) -> List[List[str]]:
+        if not table_rows:
+            return text_rows
+
+        target_cols = max(
+            max((len(r) for r in table_rows), default=0),
+            max((len(r) for r in text_rows), default=0),
+        )
+        if target_cols == 0:
+            return table_rows
+
+        def _normalize(row: List[Any]) -> List[str]:
+            normalized = [str(cell).strip() if cell is not None else "" for cell in row]
+            if len(normalized) < target_cols:
+                normalized += [""] * (target_cols - len(normalized))
+            else:
+                normalized = normalized[:target_cols]
+            return normalized
+
+        merged_rows = [_normalize(row) for row in table_rows if any(row)]
+        seen = {("|".join(row)).lower() for row in merged_rows}
+
+        for row in text_rows:
+            normalized = _normalize(row)
+            if not any(normalized):
+                continue
+            if self._looks_like_header(normalized):
+                continue
+            signature = ("|".join(normalized)).lower()
+            if signature in seen:
+                continue
+            seen.add(signature)
+            merged_rows.append(normalized)
+
+        return merged_rows
+
+    def _split_pdf_text_line(self, line: str) -> List[str]:
+        parts = [p.strip() for p in re.split(r"\s{2,}|\t", line) if p.strip()]
+        amounts = self._extract_amounts_from_line(line)
+        if not amounts:
+            return parts
+
+        for amt in amounts:
+            raw = amt.get("raw", "").strip()
+            if not raw:
+                continue
+            if any(raw in part for part in parts):
+                continue
+            parts.append(raw)
+
+        return parts
+
+    def _pick_best_pdf_payload(
+        self,
+        primary: Dict[str, Any],
+        fallback: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Prefer the payload with better debit/credit coverage when PDFs differ."""
+        if not fallback or not fallback.get("raw_data"):
+            return primary
+
+        def _payload_score(payload: Dict[str, Any]) -> tuple[int, int, int]:
+            raw_data = payload.get("raw_data") or []
+            if not raw_data:
+                return (0, 0, 0)
+            column_headers = payload.get("column_headers") or []
+            width = max((len(r) for r in raw_data), default=0)
+            col_count = len(column_headers) if column_headers else width
+            amount_cols = 0
+            for idx in range(col_count):
+                amount_score = self._column_fit_score(
+                    raw_data,
+                    idx,
+                    self._value_looks_like_amount,
+                    sample_size=40,
+                )
+                non_empty_ratio = self._column_non_empty_ratio(
+                    raw_data,
+                    idx,
+                    sample_size=40,
+                )
+                if amount_score >= 0.6 and non_empty_ratio >= 0.03:
+                    amount_cols += 1
+            return (amount_cols, col_count, len(raw_data))
+
+        primary_score = _payload_score(primary)
+        fallback_score = _payload_score(fallback)
+
+        if fallback_score > primary_score:
+            method = fallback.get("method", "pdf-local")
+            fallback["method"] = f"{method}-preferred"
+            return fallback
+
+        return primary
+
+    def _extract_pdf_ocr(
+        self,
+        file_content: bytes,
+        org_id: str,
+        max_pages: Optional[int] = None,
+        row_limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        convert_from_bytes = _load_pdf2image_convert()
+        pytesseract = _load_pytesseract()
         if not self._ocr_available():
             raise ValueError("OCR dependencies are not installed")
 
@@ -508,7 +1621,12 @@ class ExtractionService:
         rows: List[List[str]] = []
 
         try:
-            images = convert_from_bytes(file_content, dpi=220)
+            images = convert_from_bytes(
+                file_content,
+                dpi=220,
+                first_page=1,
+                last_page=max_pages or None,
+            )
         except Exception as e:
             logger.warning("OCR conversion failed: %s", str(e))
             return {"raw_data": [], "column_headers": [], "confidence": 0}
@@ -524,6 +1642,10 @@ class ExtractionService:
                 parsed = self._parse_ocr_line(line)
                 if parsed:
                     rows.append(parsed)
+                    if row_limit and len(rows) >= row_limit:
+                        break
+            if row_limit and len(rows) >= row_limit:
+                break
 
         if not rows:
             return {"raw_data": [], "column_headers": [], "confidence": 0}
@@ -727,28 +1849,94 @@ class ExtractionService:
             },
         ]
 
+    def _estimated_table_rows(self, tables: List[List[List[Any]]]) -> int:
+        return sum(len(table) for table in tables)
+
+    def _limit_rows(
+        self,
+        rows: List[List[Any]],
+        row_limit: Optional[int],
+    ) -> List[List[Any]]:
+        if row_limit is None or row_limit <= 0:
+            return rows
+        return rows[:row_limit]
+
     def _rows_to_payload(self, rows: List[List[Any]], confidence: int) -> Dict[str, Any]:
         if not rows:
             return {"raw_data": [], "column_headers": [], "confidence": 0}
 
-        first_row = rows[0]
-        has_header = self._looks_like_header(first_row)
-
-        if has_header:
-            column_headers = self._normalize_headers(first_row)
-            data_rows = rows[1:]
-        else:
-            column_headers = self._default_headers(len(first_row))
-            data_rows = rows
-
+        column_headers, data_rows = self._split_rows_with_headers(rows)
         raw_data = [self._normalize_row(row, len(column_headers)) for row in data_rows]
         raw_data, column_headers = self._ensure_min_columns(raw_data, column_headers)
+        column_headers = self._refine_headers_from_samples(raw_data, column_headers)
 
         return {
             "raw_data": raw_data,
             "column_headers": column_headers,
             "confidence": confidence,
         }
+
+    def build_preview_metrics(
+        self,
+        raw_data: List[List[Any]],
+        column_headers: List[str],
+    ) -> Dict[str, Any]:
+        metrics: Dict[str, Dict[str, Any]] = {}
+
+        for idx, header in enumerate(column_headers):
+            non_empty_count = 0
+            parsed_amount_count = 0
+            parsed_amount_total = Decimal("0")
+
+            for row in raw_data:
+                if idx >= len(row):
+                    continue
+
+                value = row[idx]
+                if value is None or str(value).strip() == "":
+                    continue
+
+                non_empty_count += 1
+                amount = self._parse_amount_value(value)
+                if amount is not None:
+                    parsed_amount_count += 1
+                    parsed_amount_total += amount
+
+            metrics[header] = {
+                "non_empty_count": non_empty_count,
+                "parsed_amount_count": parsed_amount_count,
+                "parsed_amount_total": round(float(parsed_amount_total), 2),
+            }
+
+        return {
+            "total_rows": len(raw_data),
+            "column_metrics": metrics,
+        }
+
+    def _parse_amount_value(self, value: Any) -> Optional[Decimal]:
+        if value in (None, ""):
+            return None
+
+        text = str(value).strip()
+        if not text:
+            return None
+
+        negative = False
+        if text.startswith("(") and text.endswith(")"):
+            negative = True
+            text = text[1:-1]
+
+        cleaned = text.replace(",", "").replace("$", "").replace(" ", "")
+        if cleaned.startswith("-"):
+            negative = True
+            cleaned = cleaned[1:]
+
+        try:
+            amount = Decimal(cleaned)
+        except (InvalidOperation, ValueError):
+            return None
+
+        return -amount if negative else amount
 
     def _decode_bytes(self, file_content: bytes) -> str:
         try:

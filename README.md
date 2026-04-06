@@ -6,6 +6,8 @@ The current app supports:
 
 - authenticated tenant-scoped workspaces
 - admin/reviewer roles
+- workspace-level company branding for reports
+- account-first reconciliation workspace and per-account monthly history
 - bank statement and cash book upload
 - PDF, XLSX, XLS, and CSV ingestion
 - Azure Document Intelligence + local PDF + OCR fallback extraction
@@ -13,7 +15,7 @@ The current app supports:
 - transaction standardization and persistence
 - queued extraction and reconciliation jobs
 - monthly reconciliation history and carry-forward balances
-- CSV reconciliation reports
+- print-ready reconciliation report preview / PDF export
 - audit trail for user actions
 - password reset and change flows
 - admin dead-letter dashboard for failed jobs
@@ -31,7 +33,23 @@ Users can:
 
 If SMTP is not configured in development, the reset flow falls back to showing the raw reset token in the UI.
 
-### 2. Upload
+### 2. Workspace and account setup
+
+Users manage reconciliation from `Settings -> Workspace`.
+
+The workspace now groups saved months under each reconciliation account.
+
+Users can:
+
+- create a new account
+- store an optional account number
+- choose a reconciliation month / year
+- reopen an open month for editing
+- start the next month from the same account
+
+Workspace branding such as company name, address, and logo is set once in `Settings` and reused on all reports.
+
+### 3. Upload
 
 Admins upload:
 
@@ -44,9 +62,9 @@ Supported formats:
 - XLSX / XLS
 - CSV
 
-The upload flow creates reusable upload sessions and stores source files for retry-safe background processing.
+The upload flow creates reusable upload sessions, supports adding more records into the same open month, and stores source files for retry-safe background processing.
 
-### 3. Extraction and mapping
+### 4. Extraction and mapping
 
 The backend extracts preview rows and proposes a column mapping for:
 
@@ -56,40 +74,52 @@ The backend extracts preview rows and proposes a column mapping for:
 - either `amount`
 - or `debit` + `credit`
 
-The mapping UI supports validation, previews, and debit/credit-aware bank statement handling.
+The mapping UI supports validation, previews, and deterministic debit/credit-aware handling for both bank statements and cash books.
 
-### 4. Standardization
+### 5. Standardization
 
 After mapping is confirmed, rows are standardized into a common transaction shape and persisted as:
 
 - `bank_transactions`
 - `book_transactions`
 
-The standardization layer also applies the bank-vs-cash-book polarity rules needed for reconciliation.
+The standardization layer also applies the bank-vs-cash-book polarity rules needed for reconciliation and preserves debit / credit buckets.
 
-### 5. Reconciliation
+### 6. Reconciliation
 
-Once both files are ready, reconciliation runs as a queued background job.
+Once both files are ready, reconciliation runs inside a worksheet-style `Recon Workspace`.
 
 The UI supports:
 
-- pending match review
-- approval / rejection
-- bulk approval / rejection
+- four in-place reconciliation quadrants
+- exact-match auto-highlighting and checking
+- manual checkbox-driven matching
 - manual matching
+- progressive reconcile passes
+- save / continue later
+- same-month add-records flow
 - monthly session close / reopen
-- status feedback and activity tracking
+- status feedback
 
-### 6. History and reporting
+### 7. History and reporting
 
-The app keeps monthly reconciliation sessions with:
+The app keeps monthly reconciliation sessions grouped under each account with:
 
 - opening balances
 - closing balances
+- account number
+- currency selection (default `GHS / GHC`)
 - carry-forward continuity
-- downloadable CSV reports
+- printable report preview / PDF export
 
-### 7. Operations and security
+The report preview includes:
+
+- workspace company name, address, and logo
+- account / period details
+- reconciliation quadrants and subtotals
+- adjusted balances and final difference
+
+### 8. Operations and security
 
 Admins now have access to:
 

@@ -11,6 +11,7 @@ import {
   RotateCcw,
 } from "lucide-react";
 import { apiClient } from "@/lib/api";
+import { formatCurrency, normalizeCurrencyCode } from "@/lib/currency";
 import {
   ReconciliationSession,
   useReconciliationStore,
@@ -26,6 +27,7 @@ export default function HistoryStep() {
     orgId,
     setError,
     currentUser,
+    reconSetup,
   } = useReconciliationStore();
   const [workingSessionId, setWorkingSessionId] = useState<string | null>(null);
   const [downloadingSessionId, setDownloadingSessionId] = useState<string | null>(null);
@@ -36,13 +38,6 @@ export default function HistoryStep() {
       console.error("Failed to load reconciliation history:", error);
     });
   }, [loadReconciliationHistory]);
-
-  const formatMoney = (value: number) =>
-    new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-      minimumFractionDigits: 2,
-    }).format(value);
 
   const formatTimestamp = (value?: string | null) => {
     if (!value) return "Not yet closed";
@@ -83,7 +78,8 @@ export default function HistoryStep() {
       const blobUrl = URL.createObjectURL(response.data);
       const link = document.createElement("a");
       link.href = blobUrl;
-      link.download = `reconciliation-${session.periodMonth}.csv`;
+      const safeAccount = session.accountName.toLowerCase().replace(/\s+/g, "-");
+      link.download = `reconciliation-${safeAccount}-${session.periodMonth}.csv`;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -115,7 +111,7 @@ export default function HistoryStep() {
 
           <div className="flex flex-wrap items-center gap-2">
             <button
-              onClick={() => setStep("upload")}
+              onClick={() => setStep(reconSetup ? "upload" : "setup")}
               className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
             >
               <ArrowLeft className="h-4 w-4" />
@@ -211,6 +207,7 @@ export default function HistoryStep() {
                         </span>
                       </div>
                       <p className="mt-2 text-sm text-slate-500">
+                        {session.accountName} ·{" "}
                         Updated {formatTimestamp(session.updatedAt)}
                       </p>
                     </div>
@@ -252,19 +249,31 @@ export default function HistoryStep() {
                   <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-4">
                     <MetricCard
                       label="Bank Opening"
-                      value={formatMoney(session.bankOpenBalance)}
+                      value={formatCurrency(
+                        session.bankOpenBalance,
+                        normalizeCurrencyCode(session.currencyCode)
+                      )}
                     />
                     <MetricCard
                       label="Bank Closing"
-                      value={formatMoney(session.bankClosingBalance)}
+                      value={formatCurrency(
+                        session.bankClosingBalance,
+                        normalizeCurrencyCode(session.currencyCode)
+                      )}
                     />
                     <MetricCard
                       label="Cash Book Opening"
-                      value={formatMoney(session.bookOpenBalance)}
+                      value={formatCurrency(
+                        session.bookOpenBalance,
+                        normalizeCurrencyCode(session.currencyCode)
+                      )}
                     />
                     <MetricCard
                       label="Cash Book Closing"
-                      value={formatMoney(session.bookClosingBalance)}
+                      value={formatCurrency(
+                        session.bookClosingBalance,
+                        normalizeCurrencyCode(session.currencyCode)
+                      )}
                     />
                   </div>
 

@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
@@ -19,11 +20,18 @@ from app.observability import record_job_event
 from app.schemas import (
     ProcessingJobResponse,
     ReconciliationRequest,
+    ReconciliationCloseResponse,
     ReconciliationStatusResponse,
     MatchGroupCreate,
     MatchGroupResponse,
     MatchGroupApprove,
+    MatchGroupBulkApproveRequest,
+    MatchGroupBulkApproveResponse,
+    ReconciliationBalanceUpdateRequest,
     ReconciliationSessionResponse,
+    TransactionRemovalUpdateRequest,
+    ManualTransactionCreate,
+    ReconciliationBlankPeriodRequest,
 )
 from app.services.job_service import job_service, queue_reconciliation_job
 from app.services.audit_service import audit_service
@@ -111,10 +119,12 @@ async def start_reconciliation(
     """
     Start reconciliation matching between bank and book transactions.
 
-    The matching engine uses signed amounts that already encode the
-    bank-vs-cash-book debit/credit inversion:
-    - bank credit == positive, bank debit == negative
-    - cash-book debit == positive, cash-book credit == negative
+    The matching engine reconciles by lane:
+    - bank credits against cash-book debits
+    - bank debits against cash-book credits
+
+    Signed amounts remain available for balances and reporting, but
+    matching does not depend on amount inversion semantics.
     """
     get_org_or_404(org_id, db, current_user)
     get_upload_session_or_404(request.bank_upload_session_id, db, current_user)
@@ -192,10 +202,12 @@ async def create_manual_match(
         bank_txs = db.query(BankTransaction).filter(
             BankTransaction.id.in_(match_request.bank_transaction_ids),
             BankTransaction.org_id == current_user.org_id,
+            BankTransaction.is_removed.is_(False),
         ).all()
         book_txs = db.query(BookTransaction).filter(
             BookTransaction.id.in_(match_request.book_transaction_ids),
             BookTransaction.org_id == current_user.org_id,
+            BookTransaction.is_removed.is_(False),
         ).all()
 
         if not bank_txs or not book_txs:
@@ -292,6 +304,69 @@ async def approve_match(
     return reconciliation_service.serialize_match_group(match_group)
 
 
+@router.post(
+    "/match/bulk-approve",
+    response_model=MatchGroupBulkApproveResponse,
+)
+async def approve_match_bulk(
+    payload: MatchGroupBulkApproveRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Approve multiple pending matches in one request."""
+    if not payload.match_ids:
+        return MatchGroupBulkApproveResponse(approved_ids=[], failed_ids=[])
+
+    match_groups = (
+        db.query(MatchGroup)
+        .filter(
+            MatchGroup.id.in_(payload.match_ids),
+            MatchGroup.org_id == current_user.org_id,
+        )
+        .all()
+    )
+
+    approved_ids = [group.id for group in match_groups]
+    failed_ids = [match_id for match_id in payload.match_ids if match_id not in approved_ids]
+
+    if approved_ids:
+        approved_at = datetime.utcnow()
+        db.query(MatchGroup).filter(MatchGroup.id.in_(approved_ids)).update(
+            {
+                "status": "approved",
+                "approved_at": approved_at,
+                "approved_by_user_id": current_user.id,
+                "notes": payload.notes,
+            },
+            synchronize_session=False,
+        )
+        db.query(BankTransaction).filter(
+            BankTransaction.match_group_id.in_(approved_ids),
+            BankTransaction.org_id == current_user.org_id,
+        ).update({"status": "matched"}, synchronize_session=False)
+        db.query(BookTransaction).filter(
+            BookTransaction.match_group_id.in_(approved_ids),
+            BookTransaction.org_id == current_user.org_id,
+        ).update({"status": "matched"}, synchronize_session=False)
+        db.commit()
+
+        for match_id in approved_ids:
+            audit_service.log(
+                db=db,
+                org_id=current_user.org_id,
+                actor_user_id=current_user.id,
+                action="match.approved",
+                entity_type="match_group",
+                entity_id=str(match_id),
+                metadata={"notes": payload.notes or ""},
+            )
+
+    return MatchGroupBulkApproveResponse(
+        approved_ids=approved_ids,
+        failed_ids=failed_ids,
+    )
+
+
 @router.delete("/match/{match_id}")
 async def reject_match(
     match_id: UUID,
@@ -325,6 +400,179 @@ async def reject_match(
 
 
 @router.get(
+    "/prepare/{org_id}/{bank_session_id}/{book_session_id}",
+    response_model=ReconciliationStatusResponse,
+)
+async def get_reconciliation_prepare_context(
+    org_id: UUID,
+    bank_session_id: UUID,
+    book_session_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Build the worksheet/session context before matching starts."""
+    get_org_or_404(org_id, db, current_user)
+    get_upload_session_or_404(bank_session_id, db, current_user)
+    get_upload_session_or_404(book_session_id, db, current_user)
+    return processing_service.build_status_response(
+        org_id=org_id,
+        bank_session_id=bank_session_id,
+        book_session_id=book_session_id,
+        db=db,
+        unmatched_suggestions=[],
+    )
+
+
+@router.post(
+    "/manual-entry/{org_id}/{session_id}",
+    response_model=ReconciliationStatusResponse,
+)
+async def create_manual_entry(
+    org_id: UUID,
+    session_id: UUID,
+    payload: ManualTransactionCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Create a manual transaction directly inside a reconciliation bucket."""
+    get_org_or_404(org_id, db, current_user)
+    reconciliation_session = get_reconciliation_session_or_404(
+        session_id,
+        db,
+        current_user,
+    )
+
+    if reconciliation_session.status == "closed":
+        raise HTTPException(status_code=400, detail="This reconciliation month is closed.")
+
+    amount_value = Decimal(payload.amount or 0)
+    if amount_value <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than zero.")
+
+    trans_date = datetime.fromisoformat(payload.trans_date)
+    bucket = payload.bucket
+
+    if bucket in {"bank_debit", "bank_credit"}:
+        signed_amount = amount_value if bucket == "bank_credit" else -amount_value
+        tx = BankTransaction(
+            org_id=current_user.org_id,
+            upload_session_id=None,
+            reconciliation_session_id=reconciliation_session.id,
+            trans_date=trans_date,
+            narration=payload.narration,
+            reference=payload.reference,
+            amount=signed_amount,
+            status="unreconciled",
+        )
+    else:
+        signed_amount = amount_value if bucket == "book_debit" else -amount_value
+        tx = BookTransaction(
+            org_id=current_user.org_id,
+            upload_session_id=None,
+            reconciliation_session_id=reconciliation_session.id,
+            trans_date=trans_date,
+            narration=payload.narration,
+            reference=payload.reference,
+            amount=signed_amount,
+            status="unreconciled",
+        )
+
+    db.add(tx)
+    db.commit()
+
+    audit_service.log(
+        db=db,
+        org_id=current_user.org_id,
+        actor_user_id=current_user.id,
+        action="transaction.manual_added",
+        entity_type="reconciliation_session",
+        entity_id=str(reconciliation_session.id),
+        metadata={
+            "bucket": bucket,
+            "amount": str(amount_value),
+        },
+    )
+
+    return processing_service.build_status_response(
+        org_id=current_user.org_id,
+        bank_session_id=reconciliation_session.bank_upload_session_id,
+        book_session_id=reconciliation_session.book_upload_session_id,
+        db=db,
+        reconciliation_session=reconciliation_session,
+    )
+
+
+@router.post(
+    "/session/{session_id}/start-blank",
+    response_model=ReconciliationSessionResponse,
+)
+async def start_blank_period(
+    session_id: UUID,
+    payload: ReconciliationBlankPeriodRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Open a blank reconciliation month without carrying forward balances."""
+    reference_session = get_reconciliation_session_or_404(
+        session_id,
+        db,
+        current_user,
+    )
+
+    if not payload.period_month or len(payload.period_month) != 7:
+        raise HTTPException(status_code=400, detail="Invalid period month format.")
+
+    existing = (
+        db.query(ReconciliationSession)
+        .filter(
+            ReconciliationSession.org_id == reference_session.org_id,
+            ReconciliationSession.account_name == reference_session.account_name,
+            ReconciliationSession.period_month == payload.period_month,
+        )
+        .first()
+    )
+
+    if existing:
+        return ReconciliationSessionResponse.model_validate(existing)
+
+    new_session = ReconciliationSession(
+        org_id=reference_session.org_id,
+        account_name=reference_session.account_name,
+        account_number=reference_session.account_number,
+        period_month=payload.period_month,
+        bank_open_balance=0,
+        bank_closing_balance=0,
+        book_open_balance=0,
+        book_closing_balance=0,
+        company_name=reference_session.company_name,
+        company_address=reference_session.company_address,
+        company_logo_data_url=reference_session.company_logo_data_url,
+        prepared_by=reference_session.prepared_by,
+        reviewed_by=reference_session.reviewed_by,
+        currency_code=reference_session.currency_code,
+        status="open",
+    )
+    db.add(new_session)
+    db.commit()
+    db.refresh(new_session)
+
+    audit_service.log(
+        db=db,
+        org_id=current_user.org_id,
+        actor_user_id=current_user.id,
+        action="reconciliation_session.blank_opened",
+        entity_type="reconciliation_session",
+        entity_id=str(new_session.id),
+        metadata={
+            "period_month": new_session.period_month,
+            "account_name": new_session.account_name,
+        },
+    )
+
+    return ReconciliationSessionResponse.model_validate(new_session)
+
+
+@router.get(
     "/status/{org_id}/{bank_session_id}/{book_session_id}",
     response_model=ReconciliationStatusResponse,
 )
@@ -348,6 +596,30 @@ async def get_reconciliation_status(
 
 
 @router.get(
+    "/session/{session_id}/worksheet",
+    response_model=ReconciliationStatusResponse,
+)
+async def get_reconciliation_session_worksheet(
+    session_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Load the current worksheet for a reconciliation session, including carryforward rows."""
+    reconciliation_session = get_reconciliation_session_or_404(
+        session_id,
+        db,
+        current_user,
+    )
+    return processing_service.build_status_response(
+        org_id=current_user.org_id,
+        bank_session_id=reconciliation_session.bank_upload_session_id,
+        book_session_id=reconciliation_session.book_upload_session_id,
+        db=db,
+        reconciliation_session=reconciliation_session,
+    )
+
+
+@router.get(
     "/sessions/{org_id}",
     response_model=list[ReconciliationSessionResponse],
 )
@@ -361,7 +633,10 @@ async def list_reconciliation_sessions(
     sessions = (
         db.query(ReconciliationSession)
         .filter(ReconciliationSession.org_id == current_user.org_id)
-        .order_by(ReconciliationSession.period_month.desc())
+        .order_by(
+            ReconciliationSession.period_month.desc(),
+            ReconciliationSession.account_name.asc(),
+        )
         .all()
     )
     return [
@@ -371,8 +646,113 @@ async def list_reconciliation_sessions(
 
 
 @router.post(
-    "/session/{session_id}/close",
+    "/session/{session_id}/save",
     response_model=ReconciliationSessionResponse,
+)
+async def save_reconciliation_session(
+    session_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Touch an open reconciliation session so users can intentionally save progress and resume later."""
+    reconciliation_session = get_reconciliation_session_or_404(
+        session_id,
+        db,
+        current_user,
+    )
+    reconciliation_session.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(reconciliation_session)
+    audit_service.log(
+        db=db,
+        org_id=current_user.org_id,
+        actor_user_id=current_user.id,
+        action="reconciliation_session.saved",
+        entity_type="reconciliation_session",
+        entity_id=str(session_id),
+        metadata={"period_month": reconciliation_session.period_month},
+    )
+    return ReconciliationSessionResponse.model_validate(reconciliation_session)
+
+
+@router.post(
+    "/session/{session_id}/reset",
+    response_model=ReconciliationSessionResponse,
+)
+async def reset_reconciliation_session(
+    session_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Clear transactions and balances so the month can be re-uploaded."""
+    reconciliation_session = get_reconciliation_session_or_404(
+        session_id,
+        db,
+        current_user,
+    )
+
+    bank_session_id = reconciliation_session.bank_upload_session_id
+    book_session_id = reconciliation_session.book_upload_session_id
+
+    bank_transactions = db.query(BankTransaction).filter(
+        (BankTransaction.reconciliation_session_id == reconciliation_session.id)
+        | (BankTransaction.upload_session_id == bank_session_id)
+    ).all()
+    book_transactions = db.query(BookTransaction).filter(
+        (BookTransaction.reconciliation_session_id == reconciliation_session.id)
+        | (BookTransaction.upload_session_id == book_session_id)
+    ).all()
+
+    affected_match_group_ids = {
+        tx.match_group_id
+        for tx in [*bank_transactions, *book_transactions]
+        if tx.match_group_id is not None
+    }
+
+    if affected_match_group_ids:
+        db.query(MatchGroup).filter(
+            MatchGroup.id.in_(affected_match_group_ids)
+        ).delete(synchronize_session=False)
+
+    if bank_transactions:
+        db.query(BankTransaction).filter(
+            (BankTransaction.reconciliation_session_id == reconciliation_session.id)
+            | (BankTransaction.upload_session_id == bank_session_id)
+        ).delete(synchronize_session=False)
+
+    if book_transactions:
+        db.query(BookTransaction).filter(
+            (BookTransaction.reconciliation_session_id == reconciliation_session.id)
+            | (BookTransaction.upload_session_id == book_session_id)
+        ).delete(synchronize_session=False)
+
+    reconciliation_session.bank_upload_session_id = None
+    reconciliation_session.book_upload_session_id = None
+    reconciliation_session.bank_open_balance = 0
+    reconciliation_session.book_open_balance = 0
+    reconciliation_session.bank_closing_balance = 0
+    reconciliation_session.book_closing_balance = 0
+    reconciliation_session.bank_closing_balance_override = None
+    reconciliation_session.book_closing_balance_override = None
+    reconciliation_session.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(reconciliation_session)
+
+    audit_service.log(
+        db=db,
+        org_id=current_user.org_id,
+        actor_user_id=current_user.id,
+        action="reconciliation_session.reset",
+        entity_type="reconciliation_session",
+        entity_id=str(session_id),
+    )
+
+    return ReconciliationSessionResponse.model_validate(reconciliation_session)
+
+
+@router.post(
+    "/session/{session_id}/close",
+    response_model=ReconciliationCloseResponse,
 )
 async def close_reconciliation_session(
     session_id: UUID,
@@ -385,7 +765,16 @@ async def close_reconciliation_session(
         db,
         current_user,
     )
-    closed_session = reconciliation_service.close_session(reconciliation_session, db)
+    bank_transactions, book_transactions = processing_service.get_transactions_for_reconciliation_session(
+        reconciliation_session,
+        db,
+    )
+    closed_session, next_session = reconciliation_service.close_session(
+        reconciliation_session,
+        bank_transactions,
+        book_transactions,
+        db,
+    )
     audit_service.log(
         db=db,
         org_id=current_user.org_id,
@@ -393,9 +782,95 @@ async def close_reconciliation_session(
         action="reconciliation_session.closed",
         entity_type="reconciliation_session",
         entity_id=str(session_id),
-        metadata={"period_month": closed_session.period_month},
+        metadata={
+            "period_month": closed_session.period_month,
+            "next_period_month": next_session.period_month,
+        },
     )
-    return ReconciliationSessionResponse.model_validate(closed_session)
+    return ReconciliationCloseResponse(
+        closed_session=ReconciliationSessionResponse.model_validate(closed_session),
+        next_session=ReconciliationSessionResponse.model_validate(next_session),
+    )
+
+
+@router.patch(
+    "/session/{session_id}/balances",
+    response_model=ReconciliationSessionResponse,
+)
+async def update_reconciliation_balances(
+    session_id: UUID,
+    payload: ReconciliationBalanceUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Update editable opening and closing balances for a reconciliation month."""
+    reconciliation_session = get_reconciliation_session_or_404(
+        session_id,
+        db,
+        current_user,
+    )
+    bank_transactions, book_transactions = (
+        processing_service.get_transactions_for_reconciliation_session(
+            reconciliation_session,
+            db,
+        )
+    )
+    updated_session = reconciliation_service.update_balances(
+        reconciliation_session=reconciliation_session,
+        bank_open_balance=payload.bank_open_balance,
+        book_open_balance=payload.book_open_balance,
+        bank_closing_balance=payload.bank_closing_balance,
+        book_closing_balance=payload.book_closing_balance,
+        account_number=payload.account_number,
+        company_name=payload.company_name,
+        company_address=payload.company_address,
+        company_logo_data_url=payload.company_logo_data_url,
+        prepared_by=payload.prepared_by,
+        reviewed_by=payload.reviewed_by,
+        currency_code=payload.currency_code,
+        bank_transactions=bank_transactions,
+        book_transactions=book_transactions,
+        db=db,
+    )
+    audit_service.log(
+        db=db,
+        org_id=current_user.org_id,
+        actor_user_id=current_user.id,
+        action="reconciliation_session.balances_updated",
+        entity_type="reconciliation_session",
+        entity_id=str(session_id),
+        metadata={
+            "period_month": updated_session.period_month,
+            "bank_open_balance": str(payload.bank_open_balance),
+            "book_open_balance": str(payload.book_open_balance),
+            "bank_closing_balance": str(
+                payload.bank_closing_balance
+                if payload.bank_closing_balance is not None
+                else updated_session.bank_closing_balance
+            ),
+            "book_closing_balance": str(
+                payload.book_closing_balance
+                if payload.book_closing_balance is not None
+                else updated_session.book_closing_balance
+            ),
+            "account_number": payload.account_number
+            if payload.account_number is not None
+            else updated_session.account_number,
+            "company_name": payload.company_name
+            if payload.company_name is not None
+            else updated_session.company_name,
+            "prepared_by": payload.prepared_by
+            if payload.prepared_by is not None
+            else updated_session.prepared_by,
+            "reviewed_by": payload.reviewed_by
+            if payload.reviewed_by is not None
+            else updated_session.reviewed_by,
+            "currency_code": payload.currency_code
+            if payload.currency_code is not None
+            else updated_session.currency_code,
+        },
+    )
+    return ReconciliationSessionResponse.model_validate(updated_session)
 
 
 @router.post(
@@ -426,6 +901,81 @@ async def reopen_reconciliation_session(
     return ReconciliationSessionResponse.model_validate(reopened_session)
 
 
+@router.post("/transactions/removal")
+async def update_transaction_removal_state(
+    payload: TransactionRemovalUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Exclude or restore outstanding transactions from the carryforward view."""
+    bank_ids = payload.bank_transaction_ids or []
+    book_ids = payload.book_transaction_ids or []
+    if not bank_ids and not book_ids:
+        raise HTTPException(status_code=400, detail="No transactions were selected")
+
+    bank_transactions = (
+        db.query(BankTransaction)
+        .filter(
+            BankTransaction.org_id == current_user.org_id,
+            BankTransaction.id.in_(bank_ids),
+        )
+        .all()
+        if bank_ids
+        else []
+    )
+    book_transactions = (
+        db.query(BookTransaction)
+        .filter(
+            BookTransaction.org_id == current_user.org_id,
+            BookTransaction.id.in_(book_ids),
+        )
+        .all()
+        if book_ids
+        else []
+    )
+
+    removed_at = datetime.utcnow() if payload.removed else None
+    updated_bank = 0
+    updated_book = 0
+
+    for transaction in bank_transactions:
+        if payload.removed and transaction.status != "unreconciled":
+            continue
+        transaction.is_removed = payload.removed
+        transaction.removed_at = removed_at
+        updated_bank += 1
+
+    for transaction in book_transactions:
+        if payload.removed and transaction.status != "unreconciled":
+            continue
+        transaction.is_removed = payload.removed
+        transaction.removed_at = removed_at
+        updated_book += 1
+
+    db.commit()
+    audit_service.log(
+        db=db,
+        org_id=current_user.org_id,
+        actor_user_id=current_user.id,
+        action=(
+            "transactions.removed_from_carryforward"
+            if payload.removed
+            else "transactions.restored_to_carryforward"
+        ),
+        entity_type="transaction",
+        metadata={
+            "bank_transaction_count": updated_bank,
+            "book_transaction_count": updated_book,
+        },
+    )
+    return {
+        "status": "success",
+        "removed": payload.removed,
+        "updated_bank_transactions": updated_bank,
+        "updated_book_transactions": updated_book,
+    }
+
+
 @router.get("/report/{org_id}/{bank_session_id}/{book_session_id}")
 async def download_reconciliation_report(
     org_id: UUID,
@@ -436,13 +986,21 @@ async def download_reconciliation_report(
 ):
     """Download a CSV reconciliation report for the current month."""
     get_org_or_404(org_id, db, current_user)
-    get_upload_session_or_404(bank_session_id, db, current_user)
-    get_upload_session_or_404(book_session_id, db, current_user)
+    bank_upload_session = get_upload_session_or_404(bank_session_id, db, current_user)
+    book_upload_session = get_upload_session_or_404(book_session_id, db, current_user)
     bank_transactions, book_transactions = processing_service.get_transactions_for_sessions(
         bank_session_id, book_session_id, db
     )
+    account_name, period_month = reconciliation_service.resolve_reconciliation_context(
+        bank_upload_session=bank_upload_session,
+        book_upload_session=book_upload_session,
+        bank_transactions=bank_transactions,
+        book_transactions=book_transactions,
+    )
     reconciliation_session = reconciliation_service.get_or_create_session(
         org_id=org_id,
+        account_name=account_name,
+        period_month=period_month,
         bank_upload_session_id=bank_session_id,
         book_upload_session_id=book_session_id,
         bank_transactions=bank_transactions,
@@ -451,19 +1009,30 @@ async def download_reconciliation_report(
     )
     db.commit()
     db.refresh(reconciliation_session)
+    bank_transactions, book_transactions = processing_service.get_transactions_for_reconciliation_session(
+        reconciliation_session,
+        db,
+    )
     summary = reconciliation_service.build_summary(
         reconciliation_session=reconciliation_session,
         bank_transactions=bank_transactions,
         book_transactions=book_transactions,
+    )
+    match_groups = processing_service.get_match_groups_for_transactions(
+        bank_transactions,
+        book_transactions,
+        db,
     )
     csv_content = reconciliation_service.build_report_csv(
         reconciliation_session=reconciliation_session,
         summary=summary,
         bank_transactions=bank_transactions,
         book_transactions=book_transactions,
+        match_groups=match_groups,
     )
 
-    filename = f"reconciliation-{reconciliation_session.period_month}.csv"
+    safe_account = reconciliation_session.account_name.lower().replace(" ", "-")
+    filename = f"reconciliation-{safe_account}-{reconciliation_session.period_month}.csv"
     audit_service.log(
         db=db,
         org_id=current_user.org_id,
@@ -471,7 +1040,10 @@ async def download_reconciliation_report(
         action="report.downloaded",
         entity_type="reconciliation_session",
         entity_id=str(reconciliation_session.id),
-        metadata={"period_month": reconciliation_session.period_month},
+        metadata={
+            "period_month": reconciliation_session.period_month,
+            "account_name": reconciliation_session.account_name,
+        },
     )
     return Response(
         content=csv_content,

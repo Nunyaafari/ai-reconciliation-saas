@@ -2,10 +2,21 @@ import logging
 from typing import List, Dict, Any
 from datetime import datetime, timedelta
 from decimal import Decimal
-from rapidfuzz import fuzz
 from app.database.models import BankTransaction, BookTransaction
 
 logger = logging.getLogger(__name__)
+
+
+def _token_set_ratio(left: str, right: str) -> float:
+    from rapidfuzz import fuzz
+
+    return float(fuzz.token_set_ratio(left, right))
+
+
+def _token_sort_ratio(left: str, right: str) -> float:
+    from rapidfuzz import fuzz
+
+    return float(fuzz.token_sort_ratio(left, right))
 
 
 class MatchingService:
@@ -89,7 +100,7 @@ class MatchingService:
             for book_tx in book_transactions:
                 if book_tx.id in matched_book_ids:
                     continue
-                if not self._amounts_match(bank_tx.amount, book_tx.amount):
+                if not self._amounts_match(bank_tx, book_tx):
                     continue
 
                 score = self.calculate_confidence_score(bank_tx, book_tx)
@@ -160,7 +171,7 @@ class MatchingService:
         Formula: S = (50% × value) + (20% × date) + (20% × ref) + (10% × narration)
         """
         # Value signal (50%)
-        value_signal = self._calculate_value_signal(bank_tx.amount, book_tx.amount)
+        value_signal = self._calculate_value_signal(bank_tx, book_tx)
 
         # Date signal (20%)
         date_signal = self._calculate_date_signal(bank_tx.trans_date, book_tx.trans_date)
@@ -179,21 +190,54 @@ class MatchingService:
             self.WEIGHTS["narration"] * narration_signal
         )
 
-        return int(score * 100)
+        # Use rounding instead of truncation so exact matches don't fall to 99
+        # from floating-point precision artifacts such as 0.999999999.
+        return max(0, min(100, int(round(score * 100))))
 
-    def _calculate_value_signal(self, bank_amount: Decimal, book_amount: Decimal) -> float:
-        """Value signal: 1.0 if exact match, 0.0 if different."""
-        # Handle both Decimal and float types
-        bank_val = float(bank_amount) if bank_amount else 0
-        book_val = float(book_amount) if book_amount else 0
+    def _normalized_direction(self, transaction: BankTransaction | BookTransaction) -> str | None:
+        return getattr(transaction, "direction", None)
 
-        if abs(bank_val - book_val) < self.AMOUNT_TOLERANCE:  # Floating point tolerance
+    def _reconciliation_amount(self, transaction: BankTransaction | BookTransaction) -> float:
+        direction = self._normalized_direction(transaction)
+        if direction == "debit":
+            debit_amount = getattr(transaction, "debit_amount", None)
+            if debit_amount not in (None, 0):
+                return abs(float(debit_amount))
+        if direction == "credit":
+            credit_amount = getattr(transaction, "credit_amount", None)
+            if credit_amount not in (None, 0):
+                return abs(float(credit_amount))
+        return abs(float(getattr(transaction, "amount", 0) or 0))
+
+    def _directions_match_reconciliation_lanes(
+        self,
+        bank_tx: BankTransaction,
+        book_tx: BookTransaction,
+    ) -> bool:
+        bank_direction = self._normalized_direction(bank_tx)
+        book_direction = self._normalized_direction(book_tx)
+        return (
+            (bank_direction == "credit" and book_direction == "debit")
+            or (bank_direction == "debit" and book_direction == "credit")
+        )
+
+    def _calculate_value_signal(self, bank_tx: BankTransaction, book_tx: BookTransaction) -> float:
+        """Value signal: 1.0 if reconcilable lanes and magnitudes match, 0.0 otherwise."""
+        if not self._directions_match_reconciliation_lanes(bank_tx, book_tx):
+            return 0.0
+
+        bank_val = self._reconciliation_amount(bank_tx)
+        book_val = self._reconciliation_amount(book_tx)
+
+        if abs(bank_val - book_val) < self.AMOUNT_TOLERANCE:
             return 1.0
         return 0.0
 
-    def _amounts_match(self, bank_amount: Decimal, book_amount: Decimal) -> bool:
-        bank_val = float(bank_amount) if bank_amount else 0
-        book_val = float(book_amount) if book_amount else 0
+    def _amounts_match(self, bank_tx: BankTransaction, book_tx: BookTransaction) -> bool:
+        if not self._directions_match_reconciliation_lanes(bank_tx, book_tx):
+            return False
+        bank_val = self._reconciliation_amount(bank_tx)
+        book_val = self._reconciliation_amount(book_tx)
         return abs(bank_val - book_val) < self.AMOUNT_TOLERANCE
 
     def _calculate_date_signal(self, bank_date: datetime, book_date: datetime) -> float:
@@ -231,7 +275,7 @@ class MatchingService:
             return 0.0
 
         # Use RapidFuzz for fast, accurate fuzzy matching
-        similarity = fuzz.token_sort_ratio(bank_narr, book_narr) / 100.0
+        similarity = _token_sort_ratio(bank_narr, book_narr) / 100.0
 
         return similarity
 
@@ -244,7 +288,7 @@ class MatchingService:
         Deterministic match: Exact value AND (Exact ref OR very similar narration + close date)
         """
         # Value must match exactly
-        if abs(float(bank_tx.amount) - float(book_tx.amount)) >= 0.01:
+        if not self._amounts_match(bank_tx, book_tx):
             return False
 
         # Date must be within 3 days
@@ -258,7 +302,7 @@ class MatchingService:
 
         # Check narration similarity
         if bank_tx.narration and book_tx.narration:
-            similarity = fuzz.token_sort_ratio(bank_tx.narration, book_tx.narration) / 100.0
+            similarity = _token_sort_ratio(bank_tx.narration, book_tx.narration) / 100.0
             if similarity > 0.85:  # Very high threshold for deterministic
                 return True
 
@@ -277,12 +321,20 @@ class MatchingService:
         suggestions = []
 
         for book_tx in available_book_txs:
-            if not self._amounts_match(bank_tx.amount, book_tx.amount):
+            if not self._directions_match_reconciliation_lanes(bank_tx, book_tx):
                 continue
-            confidence = self.calculate_confidence_score(bank_tx, book_tx)
 
-            if confidence >= self.MEDIUM_CONFIDENCE_THRESHOLD:
-                signals = self._get_signal_breakdown(bank_tx, book_tx)
+            signals = self._get_signal_breakdown(bank_tx, book_tx)
+            amount_matches = self._amounts_match(bank_tx, book_tx)
+
+            if self._is_deterministic_match(bank_tx, book_tx):
+                confidence = 100
+            elif amount_matches:
+                confidence = self.calculate_confidence_score(bank_tx, book_tx)
+            else:
+                confidence = self._calculate_non_amount_confidence(signals)
+
+            if confidence >= 25:
                 suggestions.append({
                     "book_tx_id": book_tx.id,
                     "confidence": confidence,
@@ -303,11 +355,30 @@ class MatchingService:
     ) -> Dict[str, float]:
         """Get individual signal scores for explanation."""
         return {
-            "value": self._calculate_value_signal(bank_tx.amount, book_tx.amount),
+            "value": self._calculate_value_signal(bank_tx, book_tx),
             "date": self._calculate_date_signal(bank_tx.trans_date, book_tx.trans_date),
             "reference": self._calculate_reference_signal(bank_tx.reference, book_tx.reference),
             "narration": self._calculate_narration_signal(bank_tx.narration, book_tx.narration),
         }
+
+    def _calculate_non_amount_confidence(self, signals: Dict[str, float]) -> int:
+        """Score suggestions when the amount does not match."""
+        non_amount_weight = (
+            self.WEIGHTS["date"]
+            + self.WEIGHTS["reference"]
+            + self.WEIGHTS["narration"]
+        )
+        if non_amount_weight <= 0:
+            return 0
+
+        non_amount_score = (
+            self.WEIGHTS["date"] * signals["date"]
+            + self.WEIGHTS["reference"] * signals["reference"]
+            + self.WEIGHTS["narration"] * signals["narration"]
+        ) / non_amount_weight
+
+        capped_score = min(0.89, max(0.0, non_amount_score))
+        return int(round(capped_score * 100))
 
     def _explain_match(self, signals: Dict[str, float], confidence: int) -> str:
         """Generate human-readable explanation for a match."""
@@ -315,6 +386,8 @@ class MatchingService:
 
         if signals["value"] == 1.0:
             reasons.append("Amount matches exactly")
+        elif confidence >= 25:
+            reasons.append("Amount differs")
         if signals["date"] >= 0.8:
             reasons.append("Date is very close")
         if signals["reference"] == 1.0:
@@ -345,7 +418,7 @@ class MatchingService:
         from itertools import combinations
 
         matching_combos = []
-        target_amount = float(bank_tx.amount)
+        target_amount = self._reconciliation_amount(bank_tx)
 
         if len(available_book_txs) < 2:
             return []
@@ -353,12 +426,12 @@ class MatchingService:
         # Filter candidates to keep search tractable
         candidate_txs = []
         for tx in available_book_txs:
-            if float(tx.amount) == 0:
+            if not self._directions_match_reconciliation_lanes(bank_tx, tx):
                 continue
-            # Same sign and not larger than target
-            if (float(tx.amount) > 0) != (target_amount > 0):
+            candidate_amount = self._reconciliation_amount(tx)
+            if candidate_amount == 0:
                 continue
-            if abs(float(tx.amount)) > abs(target_amount):
+            if candidate_amount > target_amount:
                 continue
             if bank_tx.trans_date and tx.trans_date:
                 if abs((bank_tx.trans_date - tx.trans_date).days) > self.COMBO_DATE_WINDOW_DAYS:
@@ -375,7 +448,7 @@ class MatchingService:
                     abs((bank_tx.trans_date - tx.trans_date).days)
                     if bank_tx.trans_date and tx.trans_date
                     else 9999,
-                    abs(abs(float(tx.amount)) - abs(target_amount)),
+                    abs(self._reconciliation_amount(tx) - target_amount),
                 )
             )
             candidate_txs = candidate_txs[: self.MAX_COMBO_CANDIDATES]
@@ -383,10 +456,11 @@ class MatchingService:
         # Try combinations of 2-5 transactions
         for combo_size in range(2, min(max_combo_size + 1, len(candidate_txs) + 1)):
             for combo in combinations(candidate_txs, combo_size):
-                combo_sum = sum(float(tx.amount) for tx in combo)
+                combo_match_sum = sum(self._reconciliation_amount(tx) for tx in combo)
+                combo_signed_sum = sum(float(tx.amount) for tx in combo)
 
                 # Check if sum is close to target (within $0.01)
-                if abs(combo_sum - target_amount) < self.AMOUNT_TOLERANCE:
+                if abs(combo_match_sum - target_amount) < self.AMOUNT_TOLERANCE:
                     # Calculate average confidence across all pairs
                     pair_scores = [
                         self.calculate_confidence_score(bank_tx, book_tx)
@@ -396,8 +470,8 @@ class MatchingService:
 
                     matching_combos.append({
                         "book_transaction_ids": [tx.id for tx in combo],
-                        "total_amount": combo_sum,
-                        "variance": abs(combo_sum - target_amount),
+                        "total_amount": combo_signed_sum,
+                        "variance": abs(combo_match_sum - target_amount),
                         "confidence": int(avg_confidence),
                     })
 

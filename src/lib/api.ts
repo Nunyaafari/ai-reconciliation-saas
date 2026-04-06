@@ -1,6 +1,6 @@
 // API configuration and client
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 const AUTH_TOKEN_KEY = "reconciliation_auth_token";
 
 export interface ApiResponse<T> {
@@ -59,6 +59,22 @@ class ApiClient {
     );
   }
 
+  private async readResponseBody(response: Response): Promise<any> {
+    const text = await response.text();
+
+    if (!text) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      return {
+        detail: text,
+      };
+    }
+  }
+
   private async request<T>(
     endpoint: string,
     options: RequestInit = {}
@@ -74,7 +90,7 @@ class ApiClient {
         },
       });
 
-      const data = await response.json();
+      const data = await this.readResponseBody(response);
 
       if (!response.ok) {
         return {
@@ -104,14 +120,25 @@ class ApiClient {
   async createUploadSession(
     orgId: string,
     file: File,
-    source: "bank" | "book"
+    source: "bank" | "book",
+    reconSetup?: {
+      accountName: string;
+      periodMonth: string;
+    }
   ): Promise<ApiResponse<any>> {
     const formData = new FormData();
     formData.append("file", file);
+    const params = new URLSearchParams({ source });
+    if (reconSetup?.accountName) {
+      params.set("account_name", reconSetup.accountName);
+    }
+    if (reconSetup?.periodMonth) {
+      params.set("period_month", reconSetup.periodMonth);
+    }
 
     try {
       const response = await fetch(
-        `${this.baseUrl}/api/uploads/create-session/${orgId}?source=${source}`,
+        `${this.baseUrl}/api/uploads/create-session/${orgId}?${params.toString()}`,
         {
           method: "POST",
           headers: this.buildAuthHeaders(),
@@ -119,7 +146,7 @@ class ApiClient {
         }
       );
 
-      const data = await response.json();
+      const data = await this.readResponseBody(response);
 
       if (!response.ok) {
         return {
@@ -144,21 +171,17 @@ class ApiClient {
     }
   }
 
-  async extractData(sessionId: string, file: File): Promise<ApiResponse<any>> {
-    const formData = new FormData();
-    formData.append("file", file);
-
+  async extractData(sessionId: string): Promise<ApiResponse<any>> {
     try {
       const response = await fetch(
         `${this.baseUrl}/api/uploads/extract/${sessionId}`,
         {
           method: "POST",
           headers: this.buildAuthHeaders(),
-          body: formData,
         }
       );
 
-      const data = await response.json();
+      const data = await this.readResponseBody(response);
 
       if (!response.ok) {
         return {
@@ -183,20 +206,13 @@ class ApiClient {
     }
   }
 
-  async startExtractionJob(
-    sessionId: string,
-    file: File
-  ): Promise<ApiResponse<any>> {
-    const formData = new FormData();
-    formData.append("file", file);
-
+  async startExtractionJob(sessionId: string): Promise<ApiResponse<any>> {
     try {
       const response = await fetch(
         `${this.baseUrl}/api/uploads/extract-async/${sessionId}`,
         {
           method: "POST",
           headers: this.buildAuthHeaders(),
-          body: formData,
         }
       );
 
@@ -227,7 +243,6 @@ class ApiClient {
 
   async confirmMapping(
     sessionId: string,
-    file: File,
     columnMapping: {
       date: string;
       narration: string;
@@ -239,7 +254,6 @@ class ApiClient {
     saveAsFingerprint: boolean = true
   ): Promise<ApiResponse<any>> {
     const formData = new FormData();
-    formData.append("file", file);
     formData.append("column_mapping", JSON.stringify(columnMapping));
     formData.append("save_as_fingerprint", String(saveAsFingerprint));
 
@@ -336,6 +350,23 @@ class ApiClient {
     });
   }
 
+  async createManualEntry(
+    orgId: string,
+    sessionId: string,
+    payload: {
+      bucket: "bank_debit" | "bank_credit" | "book_debit" | "book_credit";
+      trans_date: string;
+      narration: string;
+      reference?: string | null;
+      amount: number;
+    }
+  ): Promise<ApiResponse<any>> {
+    return this.request(`/api/reconciliation/manual-entry/${orgId}/${sessionId}`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
   async approveMatch(matchId: string, notes?: string): Promise<ApiResponse<any>> {
     return this.request(`/api/reconciliation/match/${matchId}/approve`, {
       method: "POST",
@@ -343,9 +374,30 @@ class ApiClient {
     });
   }
 
+  async approveMatchesBulk(
+    matchIds: string[],
+    notes?: string
+  ): Promise<ApiResponse<any>> {
+    return this.request(`/api/reconciliation/match/bulk-approve`, {
+      method: "POST",
+      body: JSON.stringify({
+        matchIds: matchIds,
+        notes,
+      }),
+    });
+  }
+
   async rejectMatch(matchId: string): Promise<ApiResponse<any>> {
     return this.request(`/api/reconciliation/match/${matchId}`, {
       method: "DELETE",
+    });
+  }
+
+  async resetReconciliationSession(
+    sessionId: string
+  ): Promise<ApiResponse<any>> {
+    return this.request(`/api/reconciliation/session/${sessionId}/reset`, {
+      method: "POST",
     });
   }
 
@@ -359,8 +411,32 @@ class ApiClient {
     );
   }
 
+  async prepareReconciliationContext(
+    orgId: string,
+    bankSessionId: string,
+    bookSessionId: string
+  ): Promise<ApiResponse<any>> {
+    return this.request(
+      `/api/reconciliation/prepare/${orgId}/${bankSessionId}/${bookSessionId}`
+    );
+  }
+
   async listReconciliationSessions(orgId: string): Promise<ApiResponse<any>> {
     return this.request(`/api/reconciliation/sessions/${orgId}`);
+  }
+
+  async getReconciliationWorksheet(
+    sessionId: string
+  ): Promise<ApiResponse<any>> {
+    return this.request(`/api/reconciliation/session/${sessionId}/worksheet`);
+  }
+
+  async saveReconciliationSession(
+    sessionId: string
+  ): Promise<ApiResponse<any>> {
+    return this.request(`/api/reconciliation/session/${sessionId}/save`, {
+      method: "POST",
+    });
   }
 
   async closeReconciliationSession(
@@ -371,11 +447,54 @@ class ApiClient {
     });
   }
 
+  async updateReconciliationSessionBalances(
+    sessionId: string,
+    payload: {
+      bank_open_balance: number;
+      book_open_balance: number;
+      bank_closing_balance?: number;
+      book_closing_balance?: number;
+      account_number?: string | null;
+      company_name?: string | null;
+      company_address?: string | null;
+      company_logo_data_url?: string | null;
+      prepared_by?: string | null;
+      reviewed_by?: string | null;
+      currency_code?: string | null;
+    }
+  ): Promise<ApiResponse<any>> {
+    return this.request(`/api/reconciliation/session/${sessionId}/balances`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async startBlankReconciliationPeriod(
+    sessionId: string,
+    periodMonth: string
+  ): Promise<ApiResponse<any>> {
+    return this.request(`/api/reconciliation/session/${sessionId}/start-blank`, {
+      method: "POST",
+      body: JSON.stringify({ period_month: periodMonth }),
+    });
+  }
+
   async reopenReconciliationSession(
     sessionId: string
   ): Promise<ApiResponse<any>> {
     return this.request(`/api/reconciliation/session/${sessionId}/reopen`, {
       method: "POST",
+    });
+  }
+
+  async updateTransactionRemovalState(payload: {
+    bank_transaction_ids?: string[];
+    book_transaction_ids?: string[];
+    removed: boolean;
+  }): Promise<ApiResponse<any>> {
+    return this.request("/api/reconciliation/transactions/removal", {
+      method: "POST",
+      body: JSON.stringify(payload),
     });
   }
 
@@ -455,6 +574,17 @@ class ApiClient {
     return this.request("/api/orgs/bootstrap", {
       method: "POST",
       body: JSON.stringify(payload || {}),
+    });
+  }
+
+  async updateCurrentOrganization(payload: {
+    name?: string;
+    company_address?: string | null;
+    company_logo_data_url?: string | null;
+  }): Promise<ApiResponse<any>> {
+    return this.request("/api/orgs/current", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
     });
   }
 

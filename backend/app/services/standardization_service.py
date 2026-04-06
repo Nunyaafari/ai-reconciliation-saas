@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import re
 from typing import Dict, List, Any
 from datetime import datetime, date
 from decimal import Decimal
@@ -80,17 +81,39 @@ class StandardizationService:
         debit_value = None
         credit_value = None
 
+        def _direction_marker(value: Any) -> str | None:
+            if value in (None, ""):
+                return None
+            text = str(value).upper()
+            if "CR" in text:
+                return "credit"
+            if "DR" in text:
+                return "debit"
+            return None
+
         debit_key = self._safe_key(getattr(column_mapping, "debit", None))
         if debit_key:
             raw_debit = raw_tx.get(debit_key)
             if raw_debit not in (None, ""):
-                debit_value = self._standardize_amount(raw_debit)
+                marker = _direction_marker(raw_debit)
+                amount = self._standardize_amount(raw_debit)
+                if marker == "credit":
+                    if credit_value is None:
+                        credit_value = amount
+                else:
+                    debit_value = amount
 
         credit_key = self._safe_key(getattr(column_mapping, "credit", None))
         if credit_key:
             raw_credit = raw_tx.get(credit_key)
             if raw_credit not in (None, ""):
-                credit_value = self._standardize_amount(raw_credit)
+                marker = _direction_marker(raw_credit)
+                amount = self._standardize_amount(raw_credit)
+                if marker == "debit":
+                    if debit_value is None:
+                        debit_value = amount
+                else:
+                    credit_value = amount
 
         return debit_value, credit_value
 
@@ -133,10 +156,6 @@ class StandardizationService:
             raw_amount = raw_tx.get(amount_key)
             if raw_amount not in (None, ""):
                 amount_value = self._standardize_amount(raw_amount)
-
-        if amount_value is not None and source == "book" and debit_value is None and credit_value is None:
-            # Auto-invert cashbook signed amounts: debits become positive, credits negative
-            amount_value = -amount_value
 
         if amount_value is None and (debit_value is not None or credit_value is not None):
             if source == "book":
@@ -205,6 +224,13 @@ class StandardizationService:
 
         amount_str = str(amount_str).strip()
 
+        upper = amount_str.upper()
+        dr_cr_sign = None
+        if "DR" in upper:
+            dr_cr_sign = -1
+        if "CR" in upper and dr_cr_sign is None:
+            dr_cr_sign = 1
+
         # Remove currency symbols
         amount_str = amount_str.replace("$", "").replace("€", "").replace("£", "")
 
@@ -213,13 +239,16 @@ class StandardizationService:
         if is_negative:
             amount_str = amount_str[1:-1]
 
-        # Remove commas (thousands separator)
+        # Remove commas (thousands separator) + any letters like CR/DR
         amount_str = amount_str.replace(",", "")
+        amount_str = re.sub(r"[A-Za-z]", "", amount_str)
 
         try:
             amount = Decimal(amount_str)
             if is_negative:
                 amount = -amount
+            if dr_cr_sign is not None and amount > 0:
+                amount = abs(amount) if dr_cr_sign > 0 else -abs(amount)
             return amount
         except:
             logger.warning(f"Could not parse amount: {amount_str}")

@@ -1,14 +1,30 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useReconciliationStore } from "@/store/reconciliation-api";
-import UploadStep from "@/components/UploadStepConnected";
-import MappingStep from "@/components/MappingStepConnected";
-import ReconciliationStep from "@/components/ReconciliationStepConnected";
-import HistoryStep from "@/components/HistoryStepConnected";
-import AuthStep from "@/components/AuthStepConnected";
-import OperationsDashboard from "@/components/OperationsDashboardConnected";
+import WorkspaceUserMenu from "@/components/WorkspaceUserMenu";
 import { useEffect } from "react";
 import { Heart } from "lucide-react";
+
+const AuthStep = dynamic(() => import("@/components/AuthStepConnected"));
+const NewReconSetupStep = dynamic(
+  () => import("@/components/NewReconSetupStepConnected")
+);
+const UploadStep = dynamic(() => import("@/components/UploadStepConnected"));
+const MappingStep = dynamic(() => import("@/components/MappingStepConnected"));
+const PrepareReconciliationStep = dynamic(
+  () => import("@/components/PrepareReconciliationStepConnected")
+);
+const ReconciliationStep = dynamic(
+  () => import("@/components/ReconciliationStepConnected")
+);
+const WorkspaceStep = dynamic(
+  () => import("@/components/WorkspaceStepConnected")
+);
+const SettingsStep = dynamic(() => import("@/components/SettingsStepConnected"));
+const OperationsDashboard = dynamic(
+  () => import("@/components/OperationsDashboardConnected")
+);
 
 export default function Home() {
   const { step, error, hydrateAuth, authStatus } = useReconciliationStore();
@@ -21,7 +37,7 @@ export default function Home() {
     // Optional: Check backend health on load
     const checkHealth = async () => {
       const apiBaseUrl =
-        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+        process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
       try {
         const response = await fetch(`${apiBaseUrl}/health`);
         if (response.ok) {
@@ -61,10 +77,14 @@ export default function Home() {
         <AuthStep />
       ) : (
         <>
+          <WorkspaceUserMenu />
+          {step === "setup" && <NewReconSetupStep />}
           {step === "upload" && <UploadStep />}
           {step === "mapping" && <MappingStep />}
+          {step === "prepare" && <PrepareReconciliationStep />}
           {step === "reconciliation" && <ReconciliationStep />}
-          {step === "history" && <HistoryStep />}
+          {(step === "workspace" || step === "history") && <WorkspaceStep />}
+          {step === "settings" && <SettingsStep />}
           {step === "ops" && <OperationsDashboard />}
         </>
       )}

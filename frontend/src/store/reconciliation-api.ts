@@ -168,7 +168,7 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
     set({ loading: true, error: null });
 
     try {
-      const response = await apiClient.extractData(sessionId, file);
+      const response = await apiClient.extractData(sessionId);
 
       if (!response.success) {
         throw new Error(response.error || "Extraction failed");
@@ -200,7 +200,6 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
     try {
       const response = await apiClient.confirmMapping(
         sessionId,
-        file,
         mapping,
         true
       );

@@ -3,8 +3,15 @@ import type { Metadata } from "next";
 import { Space_Grotesk } from "next/font/google";
 
 export const metadata: Metadata = {
-  title: "AI Reconciliation SaaS",
+  title: "EZIRECON",
   description: "Intelligent bank reconciliation made simple",
+  icons: {
+    icon: [
+      { url: "/brand/ezfavicon.svg", type: "image/svg+xml" },
+      { url: "/icon.svg", type: "image/svg+xml" },
+    ],
+    shortcut: "/brand/ezfavicon.svg",
+  },
 };
 
 const spaceGrotesk = Space_Grotesk({

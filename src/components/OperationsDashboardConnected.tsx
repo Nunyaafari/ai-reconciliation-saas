@@ -135,11 +135,11 @@ export default function OperationsDashboard() {
               The operations dashboard is reserved for admins because it exposes retry controls for failed and dead-lettered jobs.
             </p>
             <button
-              onClick={() => setStep("upload")}
+              onClick={() => setStep("settings")}
               className="mt-6 inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
             >
               <ArrowLeft className="h-4 w-4" />
-              Back to uploads
+              Back to settings
             </button>
           </div>
         </div>
@@ -165,11 +165,11 @@ export default function OperationsDashboard() {
 
           <div className="flex flex-wrap items-center gap-2">
             <button
-              onClick={() => setStep("upload")}
+              onClick={() => setStep("settings")}
               className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
             >
               <ArrowLeft className="h-4 w-4" />
-              Back To Uploads
+              Back To Settings
             </button>
             <button
               onClick={() => loadJobs()}

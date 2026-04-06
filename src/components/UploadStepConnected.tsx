@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import {
   Upload,
   File,
@@ -10,14 +10,30 @@ import {
   Clock3,
   Info,
   History,
-  RefreshCw,
-  RotateCcw,
-  KeyRound,
-  ShieldCheck,
 } from "lucide-react";
-import { useReconciliationStore } from "@/store/reconciliation-api";
-import { apiClient } from "@/lib/api";
+import {
+  Transaction,
+  useReconciliationStore,
+} from "@/store/reconciliation-api";
 import clsx from "clsx";
+import { formatCurrency, normalizeCurrencyCode } from "@/lib/currency";
+import AppBrand from "./AppBrand";
+
+const formatMoney = (value: number, currencyCode?: string | null) =>
+  formatCurrency(value, normalizeCurrencyCode(currencyCode));
+
+const sortTransactions = (transactions: Transaction[]) =>
+  [...transactions].sort((left, right) => {
+    const dateCompare = String(left.date || "").localeCompare(String(right.date || ""));
+    if (dateCompare !== 0) return dateCompare;
+
+    const referenceCompare = String(left.reference || "").localeCompare(
+      String(right.reference || "")
+    );
+    if (referenceCompare !== 0) return referenceCompare;
+
+    return String(left.narration || "").localeCompare(String(right.narration || ""));
+  });
 
 export default function UploadStep() {
   const {
@@ -33,59 +49,20 @@ export default function UploadStep() {
     bankTransactions,
     bookTransactions,
     currentMappingSource,
+    reconSetup,
+    reconciliationSession,
+    prepareReconciliationContext,
+    refreshReconciliation,
     setStep,
     currentUser,
-    currentOrganization,
-    logout,
+    orgId,
   } = useReconciliationStore();
   const [fileErrors, setFileErrors] = useState<{ bank?: string; book?: string }>({});
-  const [teamUsers, setTeamUsers] = useState<
-    Array<{ id: string; name: string; email: string; role: string }>
-  >([]);
-  const [teamLoading, setTeamLoading] = useState(false);
-  const [teamForm, setTeamForm] = useState({
-    name: "",
-    email: "",
-    password: "",
-    role: "reviewer" as "admin" | "reviewer",
-  });
-  const [jobsLoading, setJobsLoading] = useState(false);
-  const [jobs, setJobs] = useState<
-    Array<{
-      id: string;
-      jobType: string;
-      status: string;
-      message?: string | null;
-      errorMessage?: string | null;
-      attemptCount: number;
-      maxRetries: number;
-      createdAt: string;
-      deadLetteredAt?: string | null;
-    }>
-  >([]);
-  const [auditLoading, setAuditLoading] = useState(false);
-  const [auditEntries, setAuditEntries] = useState<
-    Array<{
-      id: string;
-      action: string;
-      actorName?: string | null;
-      actorEmail?: string | null;
-      entityType: string;
-      createdAt: string;
-    }>
-  >([]);
-  const [passwordForm, setPasswordForm] = useState({
-    currentPassword: "",
-    newPassword: "",
-  });
-  const [passwordNotice, setPasswordNotice] = useState<{
-    tone: "success" | "error";
-    message: string;
-  } | null>(null);
 
   const bankMapped = bankTransactions.length > 0;
   const bookMapped = bookTransactions.length > 0;
   const isAdmin = currentUser?.role === "admin";
+  const currencyCode = normalizeCurrencyCode(reconSetup?.currencyCode || "GHS");
 
   const fileProgress = useMemo(() => {
     const readyCount = Number(bankMapped) + Number(bookMapped);
@@ -94,11 +71,6 @@ export default function UploadStep() {
       percent: Math.round((readyCount / 2) * 100),
     };
   }, [bankMapped, bookMapped]);
-
-  const visibleJobs = useMemo(() => {
-    const unfinishedJobs = jobs.filter((job) => job.status !== "completed");
-    return (unfinishedJobs.length > 0 ? unfinishedJobs : jobs).slice(0, 6);
-  }, [jobs]);
 
   const handleUploadFile = async (file: File, source: "bank" | "book") => {
     try {
@@ -149,196 +121,64 @@ export default function UploadStep() {
 
   const bankStatus = getStatus("bank");
   const bookStatus = getStatus("book");
+  const canContinueReconciliation = Boolean(
+    reconciliationSession?.id || (bankSessionId && bookSessionId)
+  );
 
-  const loadUsers = async () => {
-    if (!isAdmin) return;
-    setTeamLoading(true);
-    try {
-      const response = await apiClient.listUsers();
-      if (!response.success) {
-        throw new Error(response.error || "Failed to load team members");
-      }
-      setTeamUsers(
-        (response.data || []).map((user: any) => ({
-          id: String(user.id),
-          name: user.name,
-          email: user.email,
-          role: user.role,
-        }))
-      );
-    } catch (error) {
-      console.error("Failed to load team members:", error);
-    } finally {
-      setTeamLoading(false);
-    }
-  };
-
-  const loadJobs = async () => {
-    if (!isAdmin) {
-      setJobs([]);
-      return;
-    }
-    setJobsLoading(true);
-    try {
-      const response = await apiClient.listProcessingJobs({ limit: 12 });
-      if (!response.success) {
-        throw new Error(response.error || "Failed to load jobs");
-      }
-      setJobs(
-        (response.data || []).map((job: any) => ({
-          id: String(job.id),
-          jobType: job.job_type,
-          status: job.status,
-          message: job.message || null,
-          errorMessage: job.error_message || null,
-          attemptCount: job.attempt_count || 0,
-          maxRetries: job.max_retries || 0,
-          createdAt: job.created_at,
-          deadLetteredAt: job.dead_lettered_at || null,
-        }))
-      );
-    } catch (error) {
-      console.error("Failed to load jobs:", error);
-    } finally {
-      setJobsLoading(false);
-    }
-  };
-
-  const loadAuditLogs = async () => {
-    if (!currentUser) {
-      setAuditEntries([]);
-      return;
-    }
-    setAuditLoading(true);
-    try {
-      const response = await apiClient.listAuditLogs({ limit: 10 });
-      if (!response.success) {
-        throw new Error(response.error || "Failed to load audit logs");
-      }
-      setAuditEntries(
-        (response.data || []).map((entry: any) => ({
-          id: String(entry.id),
-          action: entry.action,
-          actorName: entry.actor_user_name || null,
-          actorEmail: entry.actor_user_email || null,
-          entityType: entry.entity_type,
-          createdAt: entry.created_at,
-        }))
-      );
-    } catch (error) {
-      console.error("Failed to load audit logs:", error);
-    } finally {
-      setAuditLoading(false);
-    }
-  };
-
-  const handleCreateUser = async () => {
+  const handleContinueReconciliation = async () => {
     try {
       setError(null);
-      const response = await apiClient.createUser(teamForm);
-      if (!response.success) {
-        throw new Error(response.error || "Failed to create user");
+
+      if (bankSessionId && bookSessionId) {
+        await prepareReconciliationContext(orgId || undefined);
       }
-      setTeamForm({
-        name: "",
-        email: "",
-        password: "",
-        role: "reviewer",
-      });
-      await loadUsers();
-      await loadAuditLogs();
-    } catch (error) {
-      setError(error instanceof Error ? error.message : "Failed to create user");
+
+      if (reconciliationSession?.id || useReconciliationStore.getState().reconciliationSession?.id) {
+        await refreshReconciliation(orgId || undefined);
+        setStep("reconciliation");
+        return;
+      }
+
+      setStep("prepare");
+    } catch (err) {
+      console.error("Continue reconciliation error:", err);
     }
   };
 
-  const handleRetryJob = async (jobId: string) => {
-    try {
-      setError(null);
-      const response = await apiClient.retryProcessingJob(jobId);
-      if (!response.success) {
-        throw new Error(response.error || "Failed to queue retry");
-      }
-      await loadJobs();
-      await loadAuditLogs();
-    } catch (error) {
-      setError(error instanceof Error ? error.message : "Failed to queue retry");
-    }
-  };
-
-  const handleChangePassword = async () => {
-    setPasswordNotice(null);
-    try {
-      const response = await apiClient.changePassword({
-        current_password: passwordForm.currentPassword,
-        new_password: passwordForm.newPassword,
-      });
-      if (!response.success) {
-        throw new Error(response.error || "Failed to update password");
-      }
-      setPasswordForm({ currentPassword: "", newPassword: "" });
-      setPasswordNotice({
-        tone: "success",
-        message: response.data?.message || "Password updated successfully",
-      });
-      await loadAuditLogs();
-    } catch (error) {
-      setPasswordNotice({
-        tone: "error",
-        message: error instanceof Error ? error.message : "Failed to update password",
-      });
-    }
-  };
-
-  const formatTimestamp = (value: string) =>
-    new Date(value).toLocaleString([], {
-      dateStyle: "medium",
-      timeStyle: "short",
-    });
-
-  const formatAuditAction = (value: string) =>
-    value
-      .replace(/\./g, " ")
-      .replace(/_/g, " ")
-      .replace(/\b\w/g, (match) => match.toUpperCase());
-
-  useEffect(() => {
-    loadUsers().catch((error) => {
-      console.error("Failed to load users:", error);
-    });
-    loadJobs().catch((error) => {
-      console.error("Failed to load jobs:", error);
-    });
-    loadAuditLogs().catch((error) => {
-      console.error("Failed to load audit logs:", error);
-    });
-  }, [isAdmin, currentUser?.id]);
+  if (!reconSetup) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-6">
+        <div className="max-w-lg rounded-3xl border border-slate-200 bg-white p-8 text-center shadow-sm">
+          <h2 className="text-2xl font-semibold text-slate-900">
+            Set up an account period first
+          </h2>
+          <p className="mt-3 text-sm leading-6 text-slate-600">
+            Choose the reconciliation account plus the month and year before uploading a bank statement or cash book.
+          </p>
+          <button
+            onClick={() => setStep("setup")}
+            className="mt-6 rounded-2xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800"
+          >
+            Open Account Setup
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center p-6">
       <div className="w-full max-w-5xl">
         {/* Header */}
         <div className="mb-10 text-center">
-          <div className="inline-flex h-16 w-16 items-center justify-center rounded-2xl bg-blue-100 mb-4">
-            <svg
-              className="w-8 h-8 text-blue-600"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-              />
-            </svg>
+          <div className="mb-4 flex justify-center">
+            <AppBrand subtitle="Upload Workspace" />
           </div>
           <h1 className="text-4xl font-bold text-slate-900 mb-2 tracking-tight">
             Reconcile Faster with AI
           </h1>
           <p className="text-lg text-slate-600">
-            Upload your bank statement and cash book to prepare matching.
+            Upload the raw bank statement and cash book for this account-month, or add more records into the same open month.
           </p>
           <div className="mt-4 flex flex-wrap items-center justify-center gap-2 text-xs">
             {["PDF", "XLSX", "CSV"].map((tag) => (
@@ -350,34 +190,24 @@ export default function UploadStep() {
               </span>
             ))}
             <button
-              onClick={() => setStep("history")}
+              onClick={() => setStep("workspace")}
               className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-slate-600 hover:bg-slate-50"
             >
               <History className="h-3.5 w-3.5" />
-              Monthly history
+              Workspace
             </button>
-            {isAdmin ? (
+            {canContinueReconciliation ? (
               <button
-                onClick={() => setStep("ops")}
-                className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-slate-600 hover:bg-slate-50"
+                onClick={handleContinueReconciliation}
+                className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 font-semibold text-emerald-700 hover:bg-emerald-100"
               >
-                <ShieldCheck className="h-3.5 w-3.5" />
-                Operations
+                <CheckCircle2 className="h-3.5 w-3.5" />
+                Continue Recon
               </button>
             ) : null}
-            {currentOrganization ? (
-              <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-emerald-700">
-                {currentOrganization.name}
-              </span>
-            ) : null}
-            {currentUser ? (
-              <button
-                onClick={() => logout()}
-                className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-slate-600 hover:bg-slate-50"
-              >
-                Sign out {currentUser.name}
-              </button>
-            ) : null}
+            <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-blue-700">
+              Settings moved to the top-right user menu
+            </span>
           </div>
         </div>
 
@@ -386,13 +216,13 @@ export default function UploadStep() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
-                Step 1 of 2
+                Step 2 of 3
               </p>
               <h2 className="text-lg font-semibold text-slate-900">
                 Prepare both files
               </h2>
               <p className="text-sm text-slate-600">
-                {fileProgress.readyCount} of 2 files mapped and ready.
+                {fileProgress.readyCount} of 2 file lanes currently mapped. Re-uploading a side will append fresh rows into this same month after mapping.
               </p>
             </div>
             <div className="text-right">
@@ -400,6 +230,35 @@ export default function UploadStep() {
                 {fileProgress.percent}%
               </p>
               <p className="text-xs text-slate-500">Overall readiness</p>
+            </div>
+          </div>
+          <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 px-4 py-4">
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-blue-700">
+              Active Recon
+            </p>
+            <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-lg font-semibold text-blue-950">
+                  {reconSetup.accountName}
+                </p>
+                <p className="text-sm text-blue-800">{reconSetup.periodMonth}</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {canContinueReconciliation ? (
+                  <button
+                    onClick={handleContinueReconciliation}
+                    className="rounded-xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700"
+                  >
+                    Continue Recon
+                  </button>
+                ) : null}
+                <button
+                  onClick={() => setStep("setup")}
+                  className="rounded-xl border border-blue-200 bg-white px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100"
+                >
+                  Edit Recon Setup
+                </button>
+              </div>
             </div>
           </div>
           <div className="mt-4 h-2 w-full rounded-full bg-slate-200">
@@ -433,10 +292,10 @@ export default function UploadStep() {
                 </p>
               </div>
               <button
-                onClick={() => setStep("history")}
+                onClick={() => setStep("workspace")}
                 className="rounded-xl bg-amber-900 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-800"
               >
-                Open History
+                Open Workspace
               </button>
             </div>
           </div>
@@ -473,350 +332,33 @@ export default function UploadStep() {
           />
         </div>
 
-        {isAdmin ? (
-          <div className="mt-8 rounded-2xl border border-slate-200 bg-white/90 p-6 shadow-sm">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Team Access
-                </p>
-                <h3 className="text-lg font-semibold text-slate-900">
-                  Admins and reviewers
-                </h3>
-                <p className="text-sm text-slate-600">
-                  Admins can upload, run jobs, and close months. Reviewers can inspect workspaces, approve/reject matches, and download reports.
-                </p>
-              </div>
-              <button
-                onClick={() => loadUsers()}
-                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-              >
-                Refresh team
-              </button>
-            </div>
+        {bankMapped || bookMapped ? (
+          <div className="mt-10 space-y-8">
+            {bankMapped ? (
+              <TransactionPreviewPanel
+                title="Uploaded Bank Statement Preview"
+                subtitle="Review every bank-statement transaction that was classified from the uploaded file."
+                transactions={bankTransactions}
+                debitLabel="Bank Debits"
+                creditLabel="Bank Credits"
+                tone="blue"
+                currencyCode={currencyCode}
+              />
+            ) : null}
 
-            <div className="mt-5 grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
-              <div className="space-y-3">
-                {teamLoading ? (
-                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
-                    Loading team members...
-                  </div>
-                ) : teamUsers.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-500">
-                    No extra users yet. Add a reviewer or another admin below.
-                  </div>
-                ) : (
-                  teamUsers.map((user) => (
-                    <div
-                      key={user.id}
-                      className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
-                    >
-                      <div>
-                        <p className="text-sm font-semibold text-slate-900">{user.name}</p>
-                        <p className="text-xs text-slate-500">{user.email}</p>
-                      </div>
-                      <span
-                        className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                          user.role === "admin"
-                            ? "bg-slate-900 text-white"
-                            : "bg-blue-100 text-blue-700"
-                        }`}
-                      >
-                        {user.role}
-                      </span>
-                    </div>
-                  ))
-                )}
-              </div>
-
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-                <p className="text-sm font-semibold text-slate-900">Add team member</p>
-                <div className="mt-4 space-y-3">
-                  <input
-                    value={teamForm.name}
-                    onChange={(event) =>
-                      setTeamForm((prev) => ({ ...prev, name: event.target.value }))
-                    }
-                    placeholder="Full name"
-                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
-                  />
-                  <input
-                    value={teamForm.email}
-                    onChange={(event) =>
-                      setTeamForm((prev) => ({ ...prev, email: event.target.value }))
-                    }
-                    placeholder="Email"
-                    type="email"
-                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
-                  />
-                  <input
-                    value={teamForm.password}
-                    onChange={(event) =>
-                      setTeamForm((prev) => ({ ...prev, password: event.target.value }))
-                    }
-                    placeholder="Temporary password"
-                    type="password"
-                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
-                  />
-                  <select
-                    value={teamForm.role}
-                    onChange={(event) =>
-                      setTeamForm((prev) => ({
-                        ...prev,
-                        role: event.target.value as "admin" | "reviewer",
-                      }))
-                    }
-                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
-                  >
-                    <option value="reviewer">Reviewer</option>
-                    <option value="admin">Admin</option>
-                  </select>
-                  <button
-                    onClick={handleCreateUser}
-                    disabled={
-                      !teamForm.name || !teamForm.email || !teamForm.password || teamLoading
-                    }
-                    className={`w-full rounded-xl px-4 py-2 text-sm font-semibold ${
-                      !teamForm.name || !teamForm.email || !teamForm.password || teamLoading
-                        ? "cursor-not-allowed bg-slate-300 text-slate-600"
-                        : "bg-slate-900 text-white hover:bg-slate-800"
-                    }`}
-                  >
-                    Create user
-                  </button>
-                </div>
-              </div>
-            </div>
+            {bookMapped ? (
+              <TransactionPreviewPanel
+                title="Uploaded Cash Book Preview"
+                subtitle="Review every cash-book transaction that was classified from the uploaded file."
+                transactions={bookTransactions}
+                debitLabel="Cash Book Debits"
+                creditLabel="Cash Book Credits"
+                tone="emerald"
+                currencyCode={currencyCode}
+              />
+            ) : null}
           </div>
         ) : null}
-
-        <div
-          className={clsx(
-            "mt-8 grid gap-6",
-            isAdmin ? "lg:grid-cols-[0.9fr_1.1fr]" : "lg:grid-cols-1"
-          )}
-        >
-          <div className="rounded-2xl border border-slate-200 bg-white/90 p-6 shadow-sm">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Account Security
-                </p>
-                <h3 className="text-lg font-semibold text-slate-900">
-                  Change your password
-                </h3>
-                <p className="text-sm text-slate-600">
-                  Keep your workspace access tight with a fresh password whenever you need it.
-                </p>
-              </div>
-              <div className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-100">
-                <KeyRound className="h-5 w-5 text-slate-700" />
-              </div>
-            </div>
-
-            <div className="mt-5 space-y-3">
-              <input
-                value={passwordForm.currentPassword}
-                onChange={(event) =>
-                  setPasswordForm((prev) => ({
-                    ...prev,
-                    currentPassword: event.target.value,
-                  }))
-                }
-                placeholder="Current password"
-                type="password"
-                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
-              />
-              <input
-                value={passwordForm.newPassword}
-                onChange={(event) =>
-                  setPasswordForm((prev) => ({
-                    ...prev,
-                    newPassword: event.target.value,
-                  }))
-                }
-                placeholder="New password"
-                type="password"
-                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
-              />
-              <button
-                onClick={handleChangePassword}
-                disabled={!passwordForm.currentPassword || !passwordForm.newPassword}
-                className={`w-full rounded-xl px-4 py-2 text-sm font-semibold ${
-                  !passwordForm.currentPassword || !passwordForm.newPassword
-                    ? "cursor-not-allowed bg-slate-300 text-slate-600"
-                    : "bg-slate-900 text-white hover:bg-slate-800"
-                }`}
-              >
-                Update password
-              </button>
-              {passwordNotice ? (
-                <div
-                  className={`rounded-2xl px-4 py-3 text-sm ${
-                    passwordNotice.tone === "success"
-                      ? "border border-emerald-200 bg-emerald-50 text-emerald-800"
-                      : "border border-rose-200 bg-rose-50 text-rose-800"
-                  }`}
-                >
-                  {passwordNotice.message}
-                </div>
-              ) : null}
-            </div>
-          </div>
-
-          {isAdmin ? (
-            <div className="rounded-2xl border border-slate-200 bg-white/90 p-6 shadow-sm">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Job Recovery
-                  </p>
-                  <h3 className="text-lg font-semibold text-slate-900">
-                    Failed and queued jobs
-                  </h3>
-                  <p className="text-sm text-slate-600">
-                    Retry dead-lettered or failed jobs without leaving the workspace.
-                  </p>
-                </div>
-                <button
-                  onClick={() => loadJobs()}
-                  className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-                >
-                  <RefreshCw className="h-4 w-4" />
-                  Refresh jobs
-                </button>
-                <button
-                  onClick={() => setStep("ops")}
-                  className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800"
-                >
-                  <ShieldCheck className="h-4 w-4" />
-                  Open dashboard
-                </button>
-              </div>
-
-              <div className="mt-5 space-y-3">
-                {jobsLoading ? (
-                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
-                    Loading background jobs...
-                  </div>
-                ) : visibleJobs.length === 0 ? (
-                  <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-500">
-                    No recent jobs yet.
-                  </div>
-                ) : (
-                  visibleJobs.map((job) => (
-                    <div
-                      key={job.id}
-                      className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
-                    >
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <p className="text-sm font-semibold text-slate-900">
-                              {job.jobType === "reconciliation"
-                                ? "Reconciliation"
-                                : "Extraction"}
-                            </p>
-                            <span
-                              className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${
-                                job.status === "completed"
-                                  ? "bg-emerald-100 text-emerald-700"
-                                  : job.status === "dead_lettered"
-                                  ? "bg-rose-100 text-rose-700"
-                                  : job.status === "failed"
-                                  ? "bg-amber-100 text-amber-700"
-                                  : job.status === "running"
-                                  ? "bg-blue-100 text-blue-700"
-                                  : "bg-slate-200 text-slate-700"
-                              }`}
-                            >
-                              {job.status.replace(/_/g, " ")}
-                            </span>
-                          </div>
-                          <p className="mt-1 text-xs text-slate-500">
-                            {job.message || "No job message"}
-                          </p>
-                          <p className="mt-1 text-xs text-slate-400">
-                            Attempts: {job.attemptCount}/{job.maxRetries || 0} •{" "}
-                            {formatTimestamp(job.createdAt)}
-                          </p>
-                          {job.errorMessage ? (
-                            <p className="mt-2 text-xs text-rose-600">
-                              {job.errorMessage}
-                            </p>
-                          ) : null}
-                        </div>
-                        {job.status === "failed" || job.status === "dead_lettered" ? (
-                          <button
-                            onClick={() => handleRetryJob(job.id)}
-                            className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800"
-                          >
-                            <RotateCcw className="h-4 w-4" />
-                            Retry
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          ) : null}
-        </div>
-
-        <div className="mt-8 rounded-2xl border border-slate-200 bg-white/90 p-6 shadow-sm">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                Audit Trail
-              </p>
-              <h3 className="text-lg font-semibold text-slate-900">
-                Recent user actions
-              </h3>
-              <p className="text-sm text-slate-600">
-                A lightweight view of who changed passwords, created users, queued jobs, and took reconciliation actions.
-              </p>
-            </div>
-            <button
-              onClick={() => loadAuditLogs()}
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-            >
-              <ShieldCheck className="h-4 w-4" />
-              Refresh audit
-            </button>
-          </div>
-
-          <div className="mt-5 space-y-3">
-            {auditLoading ? (
-              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
-                Loading audit trail...
-              </div>
-            ) : auditEntries.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-sm text-slate-500">
-                No audit events recorded yet.
-              </div>
-            ) : (
-              auditEntries.map((entry) => (
-                <div
-                  key={entry.id}
-                  className="flex flex-wrap items-start justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
-                >
-                  <div>
-                    <p className="text-sm font-semibold text-slate-900">
-                      {formatAuditAction(entry.action)}
-                    </p>
-                    <p className="mt-1 text-xs text-slate-500">
-                      {entry.actorName || entry.actorEmail || "System"} • {entry.entityType}
-                    </p>
-                  </div>
-                  <p className="text-xs text-slate-400">
-                    {formatTimestamp(entry.createdAt)}
-                  </p>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
 
         {/* Error + Recovery */}
         {error && (
@@ -889,6 +431,8 @@ function UploadArea({
   disabledMessage,
 }: UploadAreaProps) {
   const [dragActive, setDragActive] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const inputId = useId();
   const variant = title === "Bank Statement" ? "blue" : "green";
 
   const styles = {
@@ -918,7 +462,13 @@ function UploadArea({
     const files = e.dataTransfer.files;
     if (files.length > 0) {
       const file = files[0];
-      if (file.type.includes("pdf") || file.name.endsWith(".xlsx") || file.name.endsWith(".csv")) {
+      const lowerName = file.name.toLowerCase();
+      if (
+        file.type.includes("pdf") ||
+        lowerName.endsWith(".xlsx") ||
+        lowerName.endsWith(".xls") ||
+        lowerName.endsWith(".csv")
+      ) {
         onUpload(file);
       }
     }
@@ -929,35 +479,47 @@ function UploadArea({
     const files = e.target.files;
     if (files && files.length > 0) {
       onUpload(files[0]);
+      e.target.value = "";
     }
   };
 
+  const openFilePicker = () => {
+    if (disabled || (loading && status === "uploading")) return;
+    if (typeof inputRef.current?.showPicker === "function") {
+      inputRef.current.showPicker();
+      return;
+    }
+    inputRef.current?.click();
+  };
+
   return (
-    <label
+    <div
       onDragEnter={() => setDragActive(true)}
       onDragLeave={() => setDragActive(false)}
       onDrop={handleDrop}
       onDragOver={(e) => e.preventDefault()}
       className={clsx(
-        "p-8 rounded-2xl border-2 border-dashed transition-all bg-white shadow-sm",
+        "rounded-2xl border-2 border-dashed bg-white p-4 shadow-sm transition-all sm:p-5",
         disabled
           ? "cursor-not-allowed opacity-70"
-          : "cursor-pointer hover:-translate-y-0.5 hover:shadow-md",
+          : "hover:-translate-y-0.5 hover:shadow-md",
         dragActive ? style.drag : style.idle,
         status === "mapped" && "border-emerald-400 bg-emerald-50/40"
       )}
     >
       <input
+        id={inputId}
+        ref={inputRef}
         type="file"
         accept=".pdf,.xlsx,.xls,.csv"
         onChange={handleChange}
         disabled={disabled || (loading && status === "uploading")}
-        className="hidden"
+        className="sr-only"
       />
       <div className="text-center">
         <div
           className={clsx(
-            "inline-flex h-12 w-12 items-center justify-center rounded-2xl mb-4",
+            "mb-2 inline-flex h-10 w-10 items-center justify-center rounded-2xl",
             style.iconBg
           )}
         >
@@ -974,7 +536,7 @@ function UploadArea({
         <h3 className="font-semibold text-slate-900 mb-1">
           {icon} {title}
         </h3>
-        <p className="text-xs text-slate-500 mb-3">
+        <p className="mb-2 text-xs text-slate-500">
           {status === "mapped"
             ? "Mapped and ready"
             : status === "uploaded"
@@ -983,7 +545,7 @@ function UploadArea({
             ? "Uploading..."
             : "PDF, XLSX, or CSV format"}
         </p>
-        <div className="mb-3 flex items-center justify-center gap-1 text-[11px] text-slate-400">
+        <div className="mb-2 flex items-center justify-center gap-1 text-[10px] text-slate-400">
           <span>Accepted: PDF, XLSX, CSV · Max size 10MB</span>
           <span className="relative group">
             <Info className="w-3.5 h-3.5 text-slate-400" />
@@ -992,7 +554,7 @@ function UploadArea({
             </span>
           </span>
         </div>
-        <div className="flex items-center justify-center gap-2 mb-2">
+        <div className="mb-1 flex items-center justify-center gap-2">
           <Upload className={clsx("w-4 h-4", style.actionText)} />
           <span className={clsx("text-sm font-medium", style.actionText)}>
             {disabled && disabledMessage
@@ -1006,6 +568,30 @@ function UploadArea({
               : "Click to upload or drag"}
           </span>
         </div>
+        {!disabled ? (
+          <div className="mb-2 space-y-1.5">
+            <button
+              type="button"
+              onClick={openFilePicker}
+              className={clsx(
+                "inline-flex items-center gap-2 rounded-xl border px-3 py-1.5 text-[11px] font-semibold transition",
+                loading && status === "uploading"
+                  ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+                  : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+              )}
+              disabled={loading && status === "uploading"}
+            >
+              <Upload className="h-3.5 w-3.5" />
+              Choose file
+            </button>
+            <label
+              htmlFor={inputId}
+              className="mx-auto flex w-full max-w-xs cursor-pointer items-center justify-center rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-[10px] font-medium text-slate-500 hover:bg-slate-100"
+            >
+              Native file picker fallback
+            </label>
+          </div>
+        ) : null}
         {errorMessage ? (
           <p className="text-xs text-rose-600">{errorMessage}</p>
         ) : (
@@ -1021,7 +607,187 @@ function UploadArea({
           </div>
         )}
       </div>
-    </label>
+    </div>
+  );
+}
+
+function TransactionPreviewPanel({
+  title,
+  subtitle,
+  transactions,
+  debitLabel,
+  creditLabel,
+  tone,
+  currencyCode,
+}: {
+  title: string;
+  subtitle: string;
+  transactions: Transaction[];
+  debitLabel: string;
+  creditLabel: string;
+  tone: "blue" | "emerald";
+  currencyCode?: string | null;
+}) {
+  const rows = useMemo(() => sortTransactions(transactions), [transactions]);
+  const debitRows = useMemo(
+    () => rows.filter((transaction) => Number(transaction.debitAmount || 0) > 0),
+    [rows]
+  );
+  const creditRows = useMemo(
+    () => rows.filter((transaction) => Number(transaction.creditAmount || 0) > 0),
+    [rows]
+  );
+  const debitTotal = useMemo(
+    () => rows.reduce((sum, transaction) => sum + Number(transaction.debitAmount || 0), 0),
+    [rows]
+  );
+  const creditTotal = useMemo(
+    () => rows.reduce((sum, transaction) => sum + Number(transaction.creditAmount || 0), 0),
+    [rows]
+  );
+
+  const toneStyles =
+    tone === "blue"
+      ? {
+          shell: "border-blue-200 bg-blue-50/40",
+          card: "border-blue-200 bg-white text-blue-950",
+          label: "text-blue-700",
+        }
+      : {
+          shell: "border-emerald-200 bg-emerald-50/40",
+          card: "border-emerald-200 bg-white text-emerald-950",
+          label: "text-emerald-700",
+        };
+
+  return (
+    <section className={clsx("overflow-hidden rounded-3xl border shadow-sm", toneStyles.shell)}>
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 bg-white px-6 py-5">
+        <div>
+          <h3 className="text-xl font-semibold text-slate-900">{title}</h3>
+          <p className="mt-2 text-sm text-slate-600">{subtitle}</p>
+        </div>
+        <div className="flex flex-wrap gap-3">
+          <div className={clsx("rounded-2xl border px-4 py-3 shadow-sm", toneStyles.card)}>
+            <p className={clsx("text-[11px] font-semibold uppercase tracking-[0.16em]", toneStyles.label)}>
+              Rows Uploaded
+            </p>
+            <p className="mt-2 text-lg font-semibold">{rows.length.toLocaleString()}</p>
+          </div>
+          <div className={clsx("rounded-2xl border px-4 py-3 shadow-sm", toneStyles.card)}>
+            <p className={clsx("text-[11px] font-semibold uppercase tracking-[0.16em]", toneStyles.label)}>
+              {debitLabel}
+            </p>
+            <p className="mt-2 text-lg font-semibold">{formatMoney(debitTotal, currencyCode)}</p>
+          </div>
+          <div className={clsx("rounded-2xl border px-4 py-3 shadow-sm", toneStyles.card)}>
+            <p className={clsx("text-[11px] font-semibold uppercase tracking-[0.16em]", toneStyles.label)}>
+              {creditLabel}
+            </p>
+            <p className="mt-2 text-lg font-semibold">{formatMoney(creditTotal, currencyCode)}</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-6 bg-white px-5 py-5 xl:grid-cols-2">
+        <TransactionDirectionPanel
+          title={debitLabel}
+          amountLabel="Debit"
+          transactions={debitRows}
+          total={debitTotal}
+          tone={tone}
+          currencyCode={currencyCode}
+          emptyMessage={`No ${debitLabel.toLowerCase()} were detected in this upload.`}
+        />
+        <TransactionDirectionPanel
+          title={creditLabel}
+          amountLabel="Credit"
+          transactions={creditRows}
+          total={creditTotal}
+          tone={tone}
+          currencyCode={currencyCode}
+          emptyMessage={`No ${creditLabel.toLowerCase()} were detected in this upload.`}
+        />
+      </div>
+    </section>
+  );
+}
+
+function TransactionDirectionPanel({
+  title,
+  amountLabel,
+  transactions,
+  total,
+  tone,
+  currencyCode,
+  emptyMessage,
+}: {
+  title: string;
+  amountLabel: "Debit" | "Credit";
+  transactions: Transaction[];
+  total: number;
+  tone: "blue" | "emerald";
+  currencyCode?: string | null;
+  emptyMessage: string;
+}) {
+  const amountKey = amountLabel === "Debit" ? "debitAmount" : "creditAmount";
+  const toneClass =
+    tone === "blue"
+      ? "border-blue-200 bg-blue-50/40"
+      : "border-emerald-200 bg-emerald-50/40";
+
+  return (
+    <div className={clsx("overflow-hidden rounded-2xl border", toneClass)}>
+      <div className="flex items-start justify-between gap-3 border-b border-slate-200 bg-white px-4 py-4">
+        <div>
+          <h4 className="text-base font-semibold text-slate-900">{title}</h4>
+          <p className="mt-1 text-xs text-slate-500">
+            {transactions.length.toLocaleString()} row{transactions.length === 1 ? "" : "s"}
+          </p>
+        </div>
+        <div className="text-right">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+            Subtotal
+          </p>
+          <p className="mt-2 text-base font-semibold text-slate-900">{formatMoney(total, currencyCode)}</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-[110px_120px_minmax(200px,1fr)_120px] gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
+        <span>Date</span>
+        <span>Reference</span>
+        <span>Narration</span>
+        <span className="text-right">{amountLabel}</span>
+      </div>
+
+      <div className="max-h-[420px] overflow-y-auto bg-white">
+        {transactions.length === 0 ? (
+          <div className="px-4 py-10 text-center text-sm text-slate-500">
+            {emptyMessage}
+          </div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {transactions.map((transaction) => (
+              <div
+                key={transaction.id}
+                className="grid grid-cols-[110px_120px_minmax(200px,1fr)_120px] gap-3 px-4 py-3 text-sm text-slate-700"
+              >
+                <span className="font-mono text-slate-500">{transaction.date || "-"}</span>
+                <span className="truncate font-mono text-slate-600">
+                  {transaction.reference || "-"}
+                </span>
+                <span className="truncate">{transaction.narration || "-"}</span>
+                <span className="text-right font-mono">
+                  {formatMoney(
+                    Number(transaction[amountKey as keyof Transaction] || 0),
+                    currencyCode
+                  )}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

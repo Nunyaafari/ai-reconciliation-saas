@@ -113,12 +113,24 @@ async def metrics():
 
 # ===== INCLUDE ROUTES =====
 
+print("app.main: importing uploads router", flush=True)
 from app.routes.uploads import router as uploads_router
+print("app.main: imported uploads router", flush=True)
+print("app.main: importing reconciliation router", flush=True)
 from app.routes.reconciliation import router as reconciliation_router
+print("app.main: imported reconciliation router", flush=True)
+print("app.main: importing organizations router", flush=True)
 from app.routes.organizations import router as organizations_router
+print("app.main: imported organizations router", flush=True)
+print("app.main: importing jobs router", flush=True)
 from app.routes.jobs import router as jobs_router
+print("app.main: imported jobs router", flush=True)
+print("app.main: importing auth router", flush=True)
 from app.routes.auth import router as auth_router
+print("app.main: imported auth router", flush=True)
+print("app.main: importing audit router", flush=True)
 from app.routes.audit import router as audit_router
+print("app.main: imported audit router", flush=True)
 
 app.include_router(uploads_router)
 app.include_router(reconciliation_router)

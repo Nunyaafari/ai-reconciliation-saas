@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { Loader, Lock, Building2, KeyRound } from "lucide-react";
 import { apiClient } from "@/lib/api";
 import { useReconciliationStore } from "@/store/reconciliation-api";
+import AppBrand from "./AppBrand";
 
 export default function AuthStep() {
   const { authStatus, login, register, loading, currentOrganization } =
@@ -139,9 +140,7 @@ export default function AuthStep() {
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 via-white to-blue-50 p-6">
       <div className="grid w-full max-w-5xl gap-8 lg:grid-cols-[1.1fr_0.9fr]">
         <div className="rounded-3xl border border-slate-200 bg-white/90 p-8 shadow-sm">
-          <div className="inline-flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-100">
-            <Building2 className="h-7 w-7 text-blue-700" />
-          </div>
+          <AppBrand subtitle="Workspace Sign-In" />
           <h1 className="mt-6 text-4xl font-bold tracking-tight text-slate-900">
             Secure, tenant-aware reconciliation
           </h1>

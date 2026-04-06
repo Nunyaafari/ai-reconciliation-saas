@@ -1,6 +1,6 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, AliasChoices
 from typing import Optional, List, Dict, Any, Literal
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal
 from uuid import UUID
 
@@ -39,6 +39,18 @@ class BankTransactionResponse(TransactionBase):
     status: str  # unreconciled, pending, matched
     match_group_id: Optional[UUID] = None
     created_at: datetime
+    is_removed: bool = False
+    removed_at: Optional[datetime] = None
+    is_carryforward: bool = False
+
+    @field_validator("trans_date", mode="before")
+    @classmethod
+    def serialize_trans_date(cls, value: Any) -> str:
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d")
+        if isinstance(value, date):
+            return value.isoformat()
+        return str(value)
 
     class Config:
         from_attributes = True
@@ -55,9 +67,31 @@ class BookTransactionResponse(TransactionBase):
     status: str
     match_group_id: Optional[UUID] = None
     created_at: datetime
+    is_removed: bool = False
+    removed_at: Optional[datetime] = None
+    is_carryforward: bool = False
+
+    @field_validator("trans_date", mode="before")
+    @classmethod
+    def serialize_trans_date(cls, value: Any) -> str:
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d")
+        if isinstance(value, date):
+            return value.isoformat()
+        return str(value)
 
     class Config:
         from_attributes = True
+
+
+class ManualTransactionCreate(BaseModel):
+    """Manual entry added during reconciliation."""
+
+    bucket: Literal["bank_debit", "bank_credit", "book_debit", "book_credit"]
+    trans_date: str  # ISO format: YYYY-MM-DD
+    narration: str
+    reference: Optional[str] = None
+    amount: Decimal
 
 
 # ===== MATCH GROUP SCHEMAS =====
@@ -98,6 +132,40 @@ class MatchGroupApprove(BaseModel):
     notes: Optional[str] = None
 
 
+class MatchGroupBulkApproveRequest(BaseModel):
+    """Approve multiple match groups in one request."""
+
+    match_ids: List[UUID] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("matchIds", "match_ids"),
+    )
+    notes: Optional[str] = None
+
+    @field_validator("match_ids", mode="before")
+    def normalize_match_ids(cls, value):
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            return []
+        normalized: list[UUID] = []
+        for item in value:
+            try:
+                normalized.append(UUID(str(item)))
+            except Exception:
+                continue
+        return normalized
+
+    class Config:
+        populate_by_name = True
+
+
+class MatchGroupBulkApproveResponse(BaseModel):
+    """Bulk approval response."""
+
+    approved_ids: List[UUID]
+    failed_ids: List[UUID]
+
+
 # ===== UPLOAD SESSION SCHEMAS =====
 
 class UploadSessionCreate(BaseModel):
@@ -107,6 +175,8 @@ class UploadSessionCreate(BaseModel):
     file_size: int  # bytes
     file_type: str  # pdf, xlsx, csv
     upload_source: str  # bank, book
+    account_name: Optional[str] = None
+    period_month: Optional[str] = None
 
 
 class UploadSessionResponse(BaseModel):
@@ -118,6 +188,8 @@ class UploadSessionResponse(BaseModel):
     file_hash: Optional[str] = None
     file_type: str
     upload_source: str
+    account_name: Optional[str] = None
+    period_month: Optional[str] = None
     status: str  # uploaded, extracting, mapping, reconciling, complete, failed
     rows_extracted: Optional[int] = None
     rows_standardized: Optional[int] = None
@@ -151,6 +223,14 @@ class DataExtractionRequest(BaseModel):
     file_type: str  # pdf, xlsx, csv
 
 
+class ColumnPreviewMetric(BaseModel):
+    """Column-level summary metrics for mapping preview."""
+
+    non_empty_count: int = 0
+    parsed_amount_count: int = 0
+    parsed_amount_total: float = 0.0
+
+
 class DataExtractionResponse(BaseModel):
     """Response from extraction - first 5 rows for preview."""
 
@@ -160,6 +240,8 @@ class DataExtractionResponse(BaseModel):
     ai_guess_mapping: ColumnMapping
     ai_confidence: int  # 0-100
     extraction_method: str
+    total_rows: int = 0
+    column_metrics: Dict[str, ColumnPreviewMetric] = Field(default_factory=dict)
 
 
 class ProcessingJobResponse(BaseModel):
@@ -226,11 +308,37 @@ class ReconciliationBucketSummary(BaseModel):
     total: Decimal
 
 
+class ReconciliationBalanceUpdateRequest(BaseModel):
+    """Editable opening and optional closing balances for a reconciliation session."""
+
+    bank_open_balance: Decimal
+    book_open_balance: Decimal
+    bank_closing_balance: Optional[Decimal] = None
+    book_closing_balance: Optional[Decimal] = None
+    account_number: Optional[str] = None
+    company_name: Optional[str] = None
+    company_address: Optional[str] = None
+    company_logo_data_url: Optional[str] = None
+    prepared_by: Optional[str] = None
+    reviewed_by: Optional[str] = None
+    currency_code: Optional[str] = None
+
+
+class TransactionRemovalUpdateRequest(BaseModel):
+    """Bulk toggle whether outstanding transactions are excluded from carryforward."""
+
+    bank_transaction_ids: List[UUID] = Field(default_factory=list)
+    book_transaction_ids: List[UUID] = Field(default_factory=list)
+    removed: bool = True
+
+
 class ReconciliationSessionResponse(BaseModel):
     """Monthly reconciliation session details."""
 
     id: UUID
     org_id: UUID
+    account_name: str
+    account_number: Optional[str] = None
     period_month: str
     bank_upload_session_id: Optional[UUID] = None
     book_upload_session_id: Optional[UUID] = None
@@ -238,6 +346,12 @@ class ReconciliationSessionResponse(BaseModel):
     bank_closing_balance: Decimal
     book_open_balance: Decimal
     book_closing_balance: Decimal
+    company_name: Optional[str] = None
+    company_address: Optional[str] = None
+    company_logo_data_url: Optional[str] = None
+    prepared_by: Optional[str] = None
+    reviewed_by: Optional[str] = None
+    currency_code: str = "GHS"
     status: str
     created_at: datetime
     updated_at: datetime
@@ -245,6 +359,19 @@ class ReconciliationSessionResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ReconciliationBlankPeriodRequest(BaseModel):
+    """Request to open a blank reconciliation period for an account."""
+
+    period_month: str  # YYYY-MM
+
+
+class ReconciliationCloseResponse(BaseModel):
+    """Result of closing a month and seeding the next month."""
+
+    closed_session: ReconciliationSessionResponse
+    next_session: Optional[ReconciliationSessionResponse] = None
 
 
 class ReconciliationSummaryResponse(BaseModel):
@@ -257,6 +384,12 @@ class ReconciliationSummaryResponse(BaseModel):
     bank_closing_balance: Decimal
     book_open_balance: Decimal
     book_closing_balance: Decimal
+    bank_debit_subtotal: Decimal
+    bank_credit_subtotal: Decimal
+    book_debit_subtotal: Decimal
+    book_credit_subtotal: Decimal
+    lane_one_difference: Decimal
+    lane_two_difference: Decimal
     adjusted_bank_balance: Decimal
     adjusted_book_balance: Decimal
     difference: Decimal
@@ -295,6 +428,8 @@ class ReconciliationStatusResponse(BaseModel):
     progress_percent: int
     reconciliation_session: Optional[ReconciliationSessionResponse] = None
     summary: Optional[ReconciliationSummaryResponse] = None
+    bank_transactions: List[BankTransactionResponse] = Field(default_factory=list)
+    book_transactions: List[BookTransactionResponse] = Field(default_factory=list)
 
 
 class ReconciliationReportRequest(BaseModel):
@@ -356,7 +491,21 @@ class OrganizationResponse(BaseModel):
     name: str
     slug: str
     email: str
+    company_address: Optional[str] = None
+    company_logo_data_url: Optional[str] = None
     created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class OrganizationUpdate(BaseModel):
+    """Editable workspace organization metadata."""
+
+    name: Optional[str] = None
+    company_address: Optional[str] = None
+    company_logo_data_url: Optional[str] = None
 
     class Config:
         from_attributes = True

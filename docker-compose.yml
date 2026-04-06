@@ -34,13 +34,14 @@ services:
   api:
     build:
       context: ./backend
-      dockerfile: Dockerfile.dev
+      dockerfile: Dockerfile
+    init: true
     container_name: reconciliation_api
     environment:
-      APP_ENV: development
+      APP_ENV: production
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://dev:password@postgres:5432/reconciliation}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      DEBUG: "True"
+      DEBUG: "False"
       LOG_LEVEL: INFO
       LOG_JSON: "True"
       FRONTEND_APP_URL: ${FRONTEND_APP_URL:-http://localhost:3001}
@@ -59,7 +60,7 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AZURE_AI_KEY: ${AZURE_AI_KEY:-}
       AZURE_AI_ENDPOINT: ${AZURE_AI_ENDPOINT:-}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:3001,http://localhost:8000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:3001,http://127.0.0.1:8000,http://localhost:8000}
     depends_on:
       postgres:
         condition: service_healthy
@@ -68,19 +69,20 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./backend:/app
+      - upload_storage:/app/storage/uploads
     command: ["sh", "/app/scripts/start.sh"]
 
   worker:
     build:
       context: ./backend
-      dockerfile: Dockerfile.dev
+      dockerfile: Dockerfile
+    init: true
     container_name: reconciliation_worker
     environment:
-      APP_ENV: development
+      APP_ENV: production
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://dev:password@postgres:5432/reconciliation}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      DEBUG: "True"
+      DEBUG: "False"
       LOG_LEVEL: INFO
       LOG_JSON: "True"
       FRONTEND_APP_URL: ${FRONTEND_APP_URL:-http://localhost:3001}
@@ -96,27 +98,31 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "ps | grep '[r]q worker reconciliation' >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
     volumes:
-      - ./backend:/app
+      - upload_storage:/app/storage/uploads
     command: ["sh", "/app/scripts/worker.sh"]
 
   frontend:
     build:
       context: .
-      dockerfile: Dockerfile.frontend.dev
+      dockerfile: Dockerfile.frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://127.0.0.1:8000}
+    init: true
     container_name: reconciliation_frontend
     environment:
-      CHOKIDAR_USEPOLLING: "true"
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://127.0.0.1:8000}
     depends_on:
       api:
         condition: service_healthy
     ports:
       - "3001:3000"
-    volumes:
-      - .:/app
-      - /app/node_modules
-    command: ["npm", "run", "dev", "--", "--hostname", "0.0.0.0", "--port", "3000"]
 
 volumes:
   postgres_data:
+  upload_storage:

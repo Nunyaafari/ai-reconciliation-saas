@@ -25,6 +25,27 @@ class ApiClient {
     this.baseUrl = baseUrl;
   }
 
+  private extractErrorMessage(data: any, status: number): string {
+    if (!data) return `HTTP ${status}`;
+    return data.error || data.detail || data.message || `HTTP ${status}`;
+  }
+
+  private async readResponseBody(response: Response): Promise<any> {
+    const text = await response.text();
+
+    if (!text) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      return {
+        detail: text,
+      };
+    }
+  }
+
   private async request<T>(
     endpoint: string,
     options: RequestInit = {}
@@ -39,12 +60,12 @@ class ApiClient {
         ...options,
       });
 
-      const data = await response.json();
+      const data = await this.readResponseBody(response);
 
       if (!response.ok) {
         return {
           success: false,
-          error: data.error || `HTTP ${response.status}`,
+          error: this.extractErrorMessage(data, response.status),
           status: response.status,
         };
       }
@@ -83,12 +104,12 @@ class ApiClient {
         }
       );
 
-      const data = await response.json();
+      const data = await this.readResponseBody(response);
 
       if (!response.ok) {
         return {
           success: false,
-          error: data.error || `HTTP ${response.status}`,
+          error: this.extractErrorMessage(data, response.status),
           status: response.status,
         };
       }
@@ -108,20 +129,16 @@ class ApiClient {
     }
   }
 
-  async extractData(sessionId: string, file: File): Promise<ApiResponse<any>> {
-    const formData = new FormData();
-    formData.append("file", file);
-
+  async extractData(sessionId: string): Promise<ApiResponse<any>> {
     try {
       const response = await fetch(
         `${this.baseUrl}/api/uploads/extract/${sessionId}`,
         {
           method: "POST",
-          body: formData,
         }
       );
 
-      const data = await response.json();
+      const data = await this.readResponseBody(response);
 
       if (!response.ok) {
         return {

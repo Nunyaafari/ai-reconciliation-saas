@@ -13,6 +13,9 @@ backend/app/__pycache__
 backend/app/database/__pycache__
 backend/app/routes/__pycache__
 backend/app/services/__pycache__
+backend/storage/uploads
+ezirecon-old
+Csv uploads
 *.pyc
 *.pyo
 *.pyd

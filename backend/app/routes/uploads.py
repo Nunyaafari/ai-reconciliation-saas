@@ -114,6 +114,46 @@ def clear_existing_session_transactions(session: UploadSession, db: Session) -> 
     ).delete(synchronize_session=False)
 
 
+def validate_period_month(period_month: str) -> str:
+    period = (period_month or "").strip()
+    if not period:
+        raise HTTPException(status_code=400, detail="Recon month is required")
+    try:
+        datetime.strptime(period, "%Y-%m")
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Recon month must be in YYYY-MM format",
+        ) from exc
+    return period
+
+
+async def resolve_session_file_content(
+    session: UploadSession,
+    upload_file: UploadFile | None,
+) -> bytes:
+    """Load file bytes from persistent storage, or fall back to the incoming upload."""
+    if session.stored_file_path and file_storage_service.exists(session.stored_file_path):
+        return file_storage_service.read_upload(session.stored_file_path)
+
+    if upload_file is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Stored upload file was not found. Please upload the file again.",
+        )
+
+    file_content = await upload_file.read()
+    file_name = upload_file.filename or session.file_name
+    file_ext = file_name.split(".")[-1].lower()
+    session.stored_file_path = file_storage_service.save_upload(
+        org_id=session.org_id,
+        session_id=session.id,
+        file_ext=file_ext,
+        content=file_content,
+    )
+    return file_content
+
+
 # ===== ENDPOINTS =====
 
 @router.post("/create-session/{org_id}", response_model=UploadSessionResponse)
@@ -121,6 +161,8 @@ async def create_upload_session(
     org_id: UUID,
     file: UploadFile = File(...),
     source: str = "bank",  # bank or book
+    account_name: str = "",
+    period_month: str = "",
     db: Session = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
@@ -133,6 +175,10 @@ async def create_upload_session(
     """
     # Verify org exists
     org = get_org_or_404(org_id, db, current_user)
+    normalized_account_name = (account_name or "").strip()
+    if not normalized_account_name:
+        raise HTTPException(status_code=400, detail="Account name is required")
+    normalized_period_month = validate_period_month(period_month)
 
     # Validate file type
     allowed_types = {"pdf", "xlsx", "xls", "csv"}
@@ -151,6 +197,8 @@ async def create_upload_session(
     existing_session = db.query(UploadSession).filter(
         UploadSession.org_id == org_id,
         UploadSession.upload_source == source,
+        UploadSession.account_name == normalized_account_name,
+        UploadSession.period_month == normalized_period_month,
         UploadSession.file_hash == file_hash,
     ).order_by(UploadSession.created_at.desc()).first()
 
@@ -161,6 +209,8 @@ async def create_upload_session(
         existing_session.file_name = file.filename
         existing_session.file_size = len(file_bytes)
         existing_session.file_type = file_type
+        existing_session.account_name = normalized_account_name
+        existing_session.period_month = normalized_period_month
         if not file_storage_service.exists(existing_session.stored_file_path):
             existing_session.stored_file_path = file_storage_service.save_upload(
                 org_id=org_id,
@@ -186,6 +236,8 @@ async def create_upload_session(
             metadata={
                 "source": source,
                 "file_name": file.filename,
+                "account_name": normalized_account_name,
+                "period_month": normalized_period_month,
             },
         )
         return UploadSessionResponse.model_validate(existing_session)
@@ -199,6 +251,8 @@ async def create_upload_session(
         stored_file_path="",
         file_type=file_type,
         upload_source=source,
+        account_name=normalized_account_name,
+        period_month=normalized_period_month,
         status="uploaded",
     )
 
@@ -225,6 +279,8 @@ async def create_upload_session(
             "source": source,
             "file_name": file.filename,
             "file_type": file_type,
+            "account_name": normalized_account_name,
+            "period_month": normalized_period_month,
         },
     )
 
@@ -234,7 +290,7 @@ async def create_upload_session(
 @router.post("/extract/{session_id}", response_model=DataExtractionResponse)
 async def extract_data(
     session_id: UUID,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
@@ -252,8 +308,7 @@ async def extract_data(
     session = get_upload_session_or_404(session_id, db, current_user)
 
     try:
-        # Read file content
-        file_content = await file.read()
+        file_content = await resolve_session_file_content(session, file)
 
         return processing_service.build_extraction_preview(
             session=session,
@@ -268,13 +323,18 @@ async def extract_data(
 @router.post("/extract-async/{session_id}", response_model=ProcessingJobResponse)
 async def extract_data_async(
     session_id: UUID,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
     """Queue extraction work and return a polling job handle."""
     session = get_upload_session_or_404(session_id, db, current_user)
-    if not file_storage_service.exists(session.stored_file_path):
+    if not session.stored_file_path or not file_storage_service.exists(session.stored_file_path):
+        if file is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Stored upload file was not found. Please upload the file again.",
+            )
         file_content = await file.read()
         file_ext = (file.filename or session.file_name).split(".")[-1].lower()
         session.stored_file_path = file_storage_service.save_upload(
@@ -324,7 +384,7 @@ async def confirm_mapping(
     session_id: UUID,
     column_mapping: str = Form(...),
     save_as_fingerprint: bool = Form(True),
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
@@ -345,8 +405,17 @@ async def confirm_mapping(
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid column_mapping: {str(e)}")
 
-        # Read full file
-        file_content = await file.read()
+        if not mapping.debit or not mapping.credit:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Map both Debit and Credit columns. Single Amount mapping is no longer supported."
+                ),
+            )
+        mapping.amount = None
+
+        # Read full file from persistent storage whenever possible
+        file_content = await resolve_session_file_content(session, file)
 
         # Extract all data
         extraction_result = extraction_service.extract(

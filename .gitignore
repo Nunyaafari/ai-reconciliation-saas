@@ -1,8 +1,43 @@
+# Dependencies
 node_modules
+backend/venv
+backend/__pycache__
+backend/**/*.pyc
+
+# Build outputs
 .next
-*.log
 dist
 build
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+
+# Environment files
 .DS_Store
 .env.local
 .env.*.local
+.env.production
+.env.staging
+.env
+backend/.env
+frontend/.env
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Uploads and storage (user data)
+backend/storage/uploads/
+Csv uploads/
+
+# Logs
+*.log
+logs/
+
+# Docker
+*.pid
+
+# Coverage
+coverage/
+.htmlcov/
