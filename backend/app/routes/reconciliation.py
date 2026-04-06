@@ -1,7 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response, Body
 from sqlalchemy.orm import Session
 from uuid import UUID
 
@@ -25,7 +25,6 @@ from app.schemas import (
     MatchGroupCreate,
     MatchGroupResponse,
     MatchGroupApprove,
-    MatchGroupBulkApproveRequest,
     MatchGroupBulkApproveResponse,
     ReconciliationBalanceUpdateRequest,
     ReconciliationSessionResponse,
@@ -309,25 +308,45 @@ async def approve_match(
     response_model=MatchGroupBulkApproveResponse,
 )
 async def approve_match_bulk(
-    payload: MatchGroupBulkApproveRequest,
+    payload: dict = Body(default_factory=dict),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_admin_user),
 ):
     """Approve multiple pending matches in one request."""
-    if not payload.match_ids:
+    raw_ids = (
+        payload.get("match_ids")
+        or payload.get("matchIds")
+        or payload.get("match_group_ids")
+        or payload.get("matchGroupIds")
+    )
+    if isinstance(raw_ids, str):
+        raw_ids = [raw_ids]
+    if not isinstance(raw_ids, list):
+        raw_ids = []
+
+    match_ids: list[UUID] = []
+    for item in raw_ids:
+        try:
+            match_ids.append(UUID(str(item)))
+        except Exception:
+            continue
+
+    if not match_ids:
         return MatchGroupBulkApproveResponse(approved_ids=[], failed_ids=[])
+
+    notes = payload.get("notes")
 
     match_groups = (
         db.query(MatchGroup)
         .filter(
-            MatchGroup.id.in_(payload.match_ids),
+            MatchGroup.id.in_(match_ids),
             MatchGroup.org_id == current_user.org_id,
         )
         .all()
     )
 
     approved_ids = [group.id for group in match_groups]
-    failed_ids = [match_id for match_id in payload.match_ids if match_id not in approved_ids]
+    failed_ids = [match_id for match_id in match_ids if match_id not in approved_ids]
 
     if approved_ids:
         approved_at = datetime.utcnow()
@@ -336,7 +355,7 @@ async def approve_match_bulk(
                 "status": "approved",
                 "approved_at": approved_at,
                 "approved_by_user_id": current_user.id,
-                "notes": payload.notes,
+                "notes": notes,
             },
             synchronize_session=False,
         )
@@ -358,7 +377,7 @@ async def approve_match_bulk(
                 action="match.approved",
                 entity_type="match_group",
                 entity_id=str(match_id),
-                metadata={"notes": payload.notes or ""},
+                metadata={"notes": notes or ""},
             )
 
     return MatchGroupBulkApproveResponse(
