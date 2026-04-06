@@ -2,6 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Response, Body
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from uuid import UUID
 
@@ -713,14 +714,16 @@ async def reset_reconciliation_session(
     bank_session_id = reconciliation_session.bank_upload_session_id
     book_session_id = reconciliation_session.book_upload_session_id
 
-    bank_transactions = db.query(BankTransaction).filter(
-        (BankTransaction.reconciliation_session_id == reconciliation_session.id)
-        | (BankTransaction.upload_session_id == bank_session_id)
-    ).all()
-    book_transactions = db.query(BookTransaction).filter(
-        (BookTransaction.reconciliation_session_id == reconciliation_session.id)
-        | (BookTransaction.upload_session_id == book_session_id)
-    ).all()
+    bank_filters = [BankTransaction.reconciliation_session_id == reconciliation_session.id]
+    if bank_session_id is not None:
+        bank_filters.append(BankTransaction.upload_session_id == bank_session_id)
+
+    book_filters = [BookTransaction.reconciliation_session_id == reconciliation_session.id]
+    if book_session_id is not None:
+        book_filters.append(BookTransaction.upload_session_id == book_session_id)
+
+    bank_transactions = db.query(BankTransaction).filter(or_(*bank_filters)).all()
+    book_transactions = db.query(BookTransaction).filter(or_(*book_filters)).all()
 
     affected_match_group_ids = {
         tx.match_group_id
@@ -728,21 +731,19 @@ async def reset_reconciliation_session(
         if tx.match_group_id is not None
     }
 
-    if affected_match_group_ids:
-        db.query(MatchGroup).filter(
-            MatchGroup.id.in_(affected_match_group_ids)
-        ).delete(synchronize_session=False)
-
     if bank_transactions:
         db.query(BankTransaction).filter(
-            (BankTransaction.reconciliation_session_id == reconciliation_session.id)
-            | (BankTransaction.upload_session_id == bank_session_id)
+            or_(*bank_filters)
         ).delete(synchronize_session=False)
 
     if book_transactions:
         db.query(BookTransaction).filter(
-            (BookTransaction.reconciliation_session_id == reconciliation_session.id)
-            | (BookTransaction.upload_session_id == book_session_id)
+            or_(*book_filters)
+        ).delete(synchronize_session=False)
+
+    if affected_match_group_ids:
+        db.query(MatchGroup).filter(
+            MatchGroup.id.in_(affected_match_group_ids)
         ).delete(synchronize_session=False)
 
     reconciliation_session.bank_upload_session_id = None

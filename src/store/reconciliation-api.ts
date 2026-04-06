@@ -1201,9 +1201,14 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
       });
       await get().loadReconciliationHistory();
 
+      const hasStartedReconPasses =
+        (worksheetResponse.data?.progress_percent || 0) > 0 ||
+        (worksheetResponse.data?.match_groups || []).length > 0;
+
       set({
         step:
-          worksheetSession?.bankUploadSessionId || worksheetSession?.bookUploadSessionId
+          (worksheetSession?.bankUploadSessionId || worksheetSession?.bookUploadSessionId) &&
+          hasStartedReconPasses
             ? "reconciliation"
             : "prepare",
         loading: false,

@@ -53,6 +53,8 @@ export default function UploadStep() {
     reconciliationSession,
     prepareReconciliationContext,
     refreshReconciliation,
+    progress,
+    matchGroups,
     setStep,
     currentUser,
     orgId,
@@ -133,7 +135,15 @@ export default function UploadStep() {
         await prepareReconciliationContext(orgId || undefined);
       }
 
-      if (reconciliationSession?.id || useReconciliationStore.getState().reconciliationSession?.id) {
+      const latestState = useReconciliationStore.getState();
+      const hasStartedReconPasses =
+        (latestState.progress || progress || 0) > 0 ||
+        (latestState.matchGroups?.length || matchGroups.length) > 0;
+
+      if (
+        hasStartedReconPasses &&
+        (reconciliationSession?.id || latestState.reconciliationSession?.id)
+      ) {
         await refreshReconciliation(orgId || undefined);
         setStep("reconciliation");
         return;
