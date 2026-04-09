@@ -203,6 +203,18 @@ Notes:
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
 ```
 
+Pre-deploy verification (migrations + health + queue + smoke):
+
+```bash
+./scripts/predeploy_check.sh
+```
+
+Optional skip for frontend smoke during backend-only maintenance:
+
+```bash
+SKIP_FRONTEND_CHECK=true ./scripts/predeploy_check.sh
+```
+
 ### Option 3: Run manually
 
 Backend:
@@ -251,6 +263,19 @@ JWT_SECRET_KEY=dev-secret-change-me
 JOB_MAX_RETRIES=3
 PASSWORD_RESET_TOKEN_EXPIRE_MINUTES=30
 ```
+
+Production guardrails now enforced by backend config:
+
+- `JWT_SECRET_KEY` must be strong (at least 32 chars) in production
+- `DEBUG` must be `False` in production
+- `AUTH_BOOTSTRAP_ENABLED` must be `false` in production
+- `FRONTEND_APP_URL` and `CORS_ORIGINS` cannot use localhost in production
+
+Route-level governance hardening:
+
+- reconcile mutation endpoints are admin-only
+- closed reconciliation months are now enforced as read-only on mutation paths
+- tenant-scope checks are enforced across upload/reconcile/job/audit routes
 
 ### Optional extraction settings
 

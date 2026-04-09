@@ -109,6 +109,40 @@ def get_match_group_or_404(
     return match_group
 
 
+def assert_reconciliation_sessions_open(
+    *,
+    bank_transactions: list[BankTransaction],
+    book_transactions: list[BookTransaction],
+    db: Session,
+) -> None:
+    """Prevent mutating transactions that belong to closed reconciliation months."""
+    session_ids = {
+        tx.reconciliation_session_id
+        for tx in [*bank_transactions, *book_transactions]
+        if tx.reconciliation_session_id is not None
+    }
+    if not session_ids:
+        return
+
+    closed_sessions = (
+        db.query(ReconciliationSession)
+        .filter(
+            ReconciliationSession.id.in_(session_ids),
+            ReconciliationSession.status == "closed",
+        )
+        .all()
+    )
+    if closed_sessions:
+        period = closed_sessions[0].period_month
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This reconciliation month is closed and read-only. "
+                f"Reopen month {period} to continue editing."
+            ),
+        )
+
+
 @router.post("/start/{org_id}", response_model=ReconciliationStatusResponse)
 async def start_reconciliation(
     org_id: UUID,
@@ -212,6 +246,11 @@ async def create_manual_match(
 
         if not bank_txs or not book_txs:
             raise HTTPException(status_code=400, detail="Invalid transaction IDs")
+        assert_reconciliation_sessions_open(
+            bank_transactions=bank_txs,
+            book_transactions=book_txs,
+            db=db,
+        )
 
         total_bank = sum(float(tx.amount) for tx in bank_txs)
         total_book = sum(float(tx.amount) for tx in book_txs)
@@ -269,7 +308,7 @@ async def approve_match(
     match_id: UUID,
     approve_request: MatchGroupApprove,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_admin_user),
 ):
     """Approve a pending match."""
     match_group = get_match_group_or_404(match_id, db, current_user)
@@ -279,6 +318,20 @@ async def approve_match(
     match_group.approved_by_user_id = current_user.id
     if approve_request.notes:
         match_group.notes = approve_request.notes
+
+    bank_txs = db.query(BankTransaction).filter(
+        BankTransaction.match_group_id == match_id,
+        BankTransaction.org_id == current_user.org_id,
+    ).all()
+    book_txs = db.query(BookTransaction).filter(
+        BookTransaction.match_group_id == match_id,
+        BookTransaction.org_id == current_user.org_id,
+    ).all()
+    assert_reconciliation_sessions_open(
+        bank_transactions=bank_txs,
+        book_transactions=book_txs,
+        db=db,
+    )
 
     db.query(BankTransaction).filter(
         BankTransaction.match_group_id == match_id,
@@ -350,6 +403,28 @@ async def approve_match_bulk(
     failed_ids = [match_id for match_id in match_ids if match_id not in approved_ids]
 
     if approved_ids:
+        bank_txs = (
+            db.query(BankTransaction)
+            .filter(
+                BankTransaction.match_group_id.in_(approved_ids),
+                BankTransaction.org_id == current_user.org_id,
+            )
+            .all()
+        )
+        book_txs = (
+            db.query(BookTransaction)
+            .filter(
+                BookTransaction.match_group_id.in_(approved_ids),
+                BookTransaction.org_id == current_user.org_id,
+            )
+            .all()
+        )
+        assert_reconciliation_sessions_open(
+            bank_transactions=bank_txs,
+            book_transactions=book_txs,
+            db=db,
+        )
+
         approved_at = datetime.utcnow()
         db.query(MatchGroup).filter(MatchGroup.id.in_(approved_ids)).update(
             {
@@ -391,10 +466,24 @@ async def approve_match_bulk(
 async def reject_match(
     match_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_admin_user),
 ):
     """Reject/delete a match."""
     match_group = get_match_group_or_404(match_id, db, current_user)
+
+    bank_txs = db.query(BankTransaction).filter(
+        BankTransaction.match_group_id == match_id,
+        BankTransaction.org_id == current_user.org_id,
+    ).all()
+    book_txs = db.query(BookTransaction).filter(
+        BookTransaction.match_group_id == match_id,
+        BookTransaction.org_id == current_user.org_id,
+    ).all()
+    assert_reconciliation_sessions_open(
+        bank_transactions=bank_txs,
+        book_transactions=book_txs,
+        db=db,
+    )
 
     db.query(BankTransaction).filter(
         BankTransaction.match_group_id == match_id,
@@ -547,12 +636,74 @@ async def start_blank_period(
         .filter(
             ReconciliationSession.org_id == reference_session.org_id,
             ReconciliationSession.account_name == reference_session.account_name,
+            ReconciliationSession.account_number == reference_session.account_number,
             ReconciliationSession.period_month == payload.period_month,
         )
         .first()
     )
 
     if existing:
+        bank_session_id = existing.bank_upload_session_id
+        book_session_id = existing.book_upload_session_id
+
+        bank_filters = [BankTransaction.reconciliation_session_id == existing.id]
+        if bank_session_id is not None:
+            bank_filters.append(BankTransaction.upload_session_id == bank_session_id)
+
+        book_filters = [BookTransaction.reconciliation_session_id == existing.id]
+        if book_session_id is not None:
+            book_filters.append(BookTransaction.upload_session_id == book_session_id)
+
+        bank_transactions = db.query(BankTransaction).filter(or_(*bank_filters)).all()
+        book_transactions = db.query(BookTransaction).filter(or_(*book_filters)).all()
+
+        affected_match_group_ids = {
+            tx.match_group_id
+            for tx in [*bank_transactions, *book_transactions]
+            if tx.match_group_id is not None
+        }
+
+        if bank_transactions:
+            db.query(BankTransaction).filter(
+                or_(*bank_filters)
+            ).delete(synchronize_session=False)
+
+        if book_transactions:
+            db.query(BookTransaction).filter(
+                or_(*book_filters)
+            ).delete(synchronize_session=False)
+
+        if affected_match_group_ids:
+            db.query(MatchGroup).filter(
+                MatchGroup.id.in_(affected_match_group_ids)
+            ).delete(synchronize_session=False)
+
+        existing.bank_upload_session_id = None
+        existing.book_upload_session_id = None
+        existing.bank_open_balance = 0
+        existing.bank_closing_balance = 0
+        existing.book_open_balance = 0
+        existing.book_closing_balance = 0
+        existing.bank_closing_balance_override = None
+        existing.book_closing_balance_override = None
+        existing.status = "open"
+        existing.closed_at = None
+        existing.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(existing)
+
+        audit_service.log(
+            db=db,
+            org_id=current_user.org_id,
+            actor_user_id=current_user.id,
+            action="reconciliation_session.blank_reopened",
+            entity_type="reconciliation_session",
+            entity_id=str(existing.id),
+            metadata={
+                "period_month": existing.period_month,
+                "account_name": existing.account_name,
+            },
+        )
         return ReconciliationSessionResponse.model_validate(existing)
 
     new_session = ReconciliationSession(
@@ -710,6 +861,11 @@ async def reset_reconciliation_session(
         db,
         current_user,
     )
+    if reconciliation_session.status == "closed":
+        raise HTTPException(
+            status_code=400,
+            detail="This reconciliation month is closed and read-only.",
+        )
 
     bank_session_id = reconciliation_session.bank_upload_session_id
     book_session_id = reconciliation_session.book_upload_session_id
@@ -829,6 +985,11 @@ async def update_reconciliation_balances(
         db,
         current_user,
     )
+    if reconciliation_session.status == "closed":
+        raise HTTPException(
+            status_code=400,
+            detail="This reconciliation month is closed. Balances are read-only.",
+        )
     bank_transactions, book_transactions = (
         processing_service.get_transactions_for_reconciliation_session(
             reconciliation_session,
@@ -952,6 +1113,11 @@ async def update_transaction_removal_state(
         .all()
         if book_ids
         else []
+    )
+    assert_reconciliation_sessions_open(
+        bank_transactions=bank_transactions,
+        book_transactions=book_transactions,
+        db=db,
     )
 
     removed_at = datetime.utcnow() if payload.removed else None

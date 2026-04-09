@@ -28,7 +28,10 @@ else
 fi
 
 if [ "${APP_ENV:-development}" = "production" ] || [ "${API_RELOAD:-false}" != "true" ]; then
-  exec uvicorn app.main:app --host "${API_HOST:-0.0.0.0}" --port "${API_PORT:-8000}"
+  exec uvicorn app.main:app \
+    --host "${API_HOST:-0.0.0.0}" \
+    --port "${API_PORT:-8000}" \
+    --workers "${WEB_CONCURRENCY:-2}"
 fi
 
 exec uvicorn app.main:app --reload --host "${API_HOST:-0.0.0.0}" --port "${API_PORT:-8000}"

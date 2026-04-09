@@ -251,12 +251,53 @@ The product still needs tightening so every screen consistently follows the work
 - Backup and restore procedures for database and uploaded files
 - Error tracking, alerting, and structured logs
 
+Current execution checklist (April 2026):
+
+- [x] Enforce backend production guardrails at startup:
+  - reject weak `JWT_SECRET_KEY`
+  - reject `DEBUG=true` in production
+  - reject localhost `FRONTEND_APP_URL` / `CORS_ORIGINS` in production
+  - reject `AUTH_BOOTSTRAP_ENABLED=true` in production
+- [ ] Add explicit staging and production deploy runbooks with cutover/rollback steps
+- [x] Add automated pre-deploy check:
+  - `alembic upgrade head` must succeed
+  - API `/health` and worker queue checks must pass
+  - static asset build and startup smoke checks must pass
+- [ ] Add backup/restore scripts and schedule:
+  - postgres dump rotation policy
+  - uploaded file storage snapshot policy
+  - quarterly restore drill
+- [ ] Add structured log shipping and central error tracking
+- [ ] Add container resource defaults for heavy reconciliations (CPU/memory limits and timeouts)
+
 ### 9. Security And Governance
 
 - Keep tenant scoping strict
 - Maintain role-based permissions
 - Add password reset email hardening and account security checks
 - Review exported reports and audit access paths
+
+Current execution checklist (April 2026):
+
+- [x] Tenant-scope verification pass on every route:
+  - no cross-tenant reads/writes by ID
+  - no session leaks across organizations
+- [x] Role-based permission pass:
+  - admin-only mutate operations
+  - reviewer read-only enforcement on upload/mapping/reconcile/close/reset flows
+- [ ] Password reset hardening:
+  - token entropy and expiry checks
+  - invalidate previous tokens on issue
+  - rate-limit reset and login attempts
+- [ ] Session and auth hardening:
+  - audit failed auth attempts
+  - enforce secure defaults for JWT secret and expiration
+  - tighten CORS and frontend origin policy
+- [ ] Report and audit governance:
+  - verify only authorized users can access exports
+  - ensure closed-month data remains immutable except explicit reopen path
+- [ ] Security release gate:
+  - add a mandatory pre-production security checklist sign-off
 
 ## Practical Build Order
 

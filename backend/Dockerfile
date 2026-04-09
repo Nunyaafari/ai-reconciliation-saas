@@ -24,8 +24,8 @@ USER appuser
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=5 \
-    CMD curl -f http://localhost:8000/health || exit 1
+HEALTHCHECK --interval=30s --timeout=45s --start-period=60s --retries=5 \
+    CMD curl --fail --silent --show-error --max-time 20 http://localhost:8000/health || exit 1
 
 ENV APP_ENV=production \
     API_HOST=0.0.0.0 \
