@@ -244,6 +244,102 @@ class DataExtractionResponse(BaseModel):
     column_metrics: Dict[str, ColumnPreviewMetric] = Field(default_factory=dict)
 
 
+class ExtractionDraftRow(BaseModel):
+    """Editable row persisted for PDF extraction review."""
+
+    row_index: int
+    cells: List[Any]
+    row_type: Literal["header", "transaction", "footer", "summary", "unknown", "deleted"]
+    warnings: List[str] = Field(default_factory=list)
+    confidence: int = 0
+    is_repeated_header: bool = False
+    is_within_selected_region: bool = False
+    provenance: Optional[str] = None
+
+
+class ExtractionDraftValidationIssue(BaseModel):
+    """Validation issue surfaced during draft review."""
+
+    code: str
+    severity: Literal["blocking", "warning", "info"] = "warning"
+    message: str
+    row_indices: List[int] = Field(default_factory=list)
+
+
+class ExtractionDraftValidationSummary(BaseModel):
+    """Current validation state for an extraction draft."""
+
+    totals: Dict[str, float] = Field(default_factory=dict)
+    parse_coverage: Dict[str, float] = Field(default_factory=dict)
+    suspicious_row_count: int = 0
+    issues: List[ExtractionDraftValidationIssue] = Field(default_factory=list)
+
+
+class ExtractionDraftResponse(BaseModel):
+    """Full extraction draft response used by PDF review workflow."""
+
+    id: UUID
+    upload_session_id: UUID
+    org_id: UUID
+    version: int
+    source_method: str
+    confidence: int
+    status: str
+    column_headers: List[str] = Field(default_factory=list)
+    mapped_fields: ColumnMapping
+    raw_rows: List[ExtractionDraftRow] = Field(default_factory=list)
+    reviewed_rows: List[ExtractionDraftRow] = Field(default_factory=list)
+    header_row_index: Optional[int] = None
+    table_start_row_index: Optional[int] = None
+    table_end_row_index: Optional[int] = None
+    validation_summary: ExtractionDraftValidationSummary = Field(
+        default_factory=ExtractionDraftValidationSummary
+    )
+    created_at: datetime
+    updated_at: datetime
+    finalized_at: Optional[datetime] = None
+
+
+class ExtractionDraftMappingUpdateRequest(BaseModel):
+    """Update mapped fields on a persisted extraction draft."""
+
+    mapping: ColumnMapping
+
+
+class ExtractionDraftRegionUpdateRequest(BaseModel):
+    """Update reviewed header/transaction region boundaries."""
+
+    header_row_index: Optional[int] = None
+    table_start_row_index: Optional[int] = None
+    table_end_row_index: Optional[int] = None
+
+
+class ExtractionDraftRowEdit(BaseModel):
+    """Single row/cell update for extraction draft review."""
+
+    row_index: int
+    cells: Optional[List[Any]] = None
+    row_type: Optional[Literal["header", "transaction", "footer", "summary", "unknown", "deleted"]] = None
+    is_repeated_header: Optional[bool] = None
+    is_within_selected_region: Optional[bool] = None
+
+
+class ExtractionDraftRowsUpdateRequest(BaseModel):
+    """Bulk row edits for a draft review grid."""
+
+    edits: List[ExtractionDraftRowEdit] = Field(default_factory=list)
+
+
+class ExtractionDraftFinalizeResponse(BaseModel):
+    """Result of finalizing a reviewed PDF extraction draft."""
+
+    status: str
+    standardized_count: int
+    session_id: str
+    draft_id: UUID
+    bucket_summaries: Dict[str, Dict[str, float]] = Field(default_factory=dict)
+
+
 class ProcessingJobResponse(BaseModel):
     """Response schema for async extraction/reconciliation jobs."""
 

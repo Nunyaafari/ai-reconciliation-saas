@@ -11,6 +11,7 @@ export default function MappingStep() {
     bankSessionId,
     bookSessionId,
     currentMappingSource,
+    currentDraft,
     extractAndPreviewData,
     confirmMappingAndStandardize,
     prepareReconciliationContext,
@@ -39,6 +40,7 @@ export default function MappingStep() {
     >
   >({});
   const [aiMapping, setAiMapping] = useState<ColumnMapping | null>(null);
+  const [isPdfDraftFlow, setIsPdfDraftFlow] = useState(false);
   const [userMapping, setUserMapping] = useState<ColumnMapping>({
     date: "Date",
     narration: "Narration",
@@ -387,6 +389,7 @@ export default function MappingStep() {
     setUserMapping(resolvedMapping);
     setExtractionMethod(result.extractionMethod);
     setExtractionConfidence(result.extractionConfidence);
+    setIsPdfDraftFlow(Boolean(result.draft));
   }, [extractAndPreviewData]);
 
   useEffect(() => {
@@ -477,6 +480,10 @@ export default function MappingStep() {
 
       await confirmMappingAndStandardize(sessionId, userMapping, source);
       setConfirmed(true);
+
+      if (isPdfDraftFlow || currentDraft) {
+        return;
+      }
 
       // After confirming mapping, check if both files are uploaded
       const hasBank = bankSessionId !== null;
@@ -581,90 +588,8 @@ export default function MappingStep() {
     };
   }, [extractionMethod]);
 
-  const debitCreditTotalsStatus = useMemo(() => {
-    if (!isSelected(userMapping.debit) || !isSelected(userMapping.credit)) {
-      return {
-        tone: "neutral" as const,
-        title: "Waiting for debit/credit mapping",
-        detail: "Select both debit and credit columns to validate uploaded totals.",
-      };
-    }
-
-    if (!selectedDebitMetric || !selectedCreditMetric) {
-      return {
-        tone: "neutral" as const,
-        title: "Checking mapped totals",
-        detail: "We will validate the debit and credit totals as soon as both columns are available.",
-      };
-    }
-
-    const debitParseRatio =
-      selectedDebitMetric.nonEmptyCount > 0
-        ? selectedDebitMetric.parsedAmountCount / selectedDebitMetric.nonEmptyCount
-        : 1;
-    const creditParseRatio =
-      selectedCreditMetric.nonEmptyCount > 0
-        ? selectedCreditMetric.parsedAmountCount / selectedCreditMetric.nonEmptyCount
-        : 1;
-
-    const debitLooksValid = columnSampleValidation.debit?.ok !== false;
-    const creditLooksValid = columnSampleValidation.credit?.ok !== false;
-    const hasDetectedAmounts =
-      selectedDebitMetric.parsedAmountCount + selectedCreditMetric.parsedAmountCount > 0;
-    const totalsLookHealthy =
-      hasDetectedAmounts &&
-      debitLooksValid &&
-      creditLooksValid &&
-      debitParseRatio >= 0.8 &&
-      creditParseRatio >= 0.8;
-
-    if (totalsLookHealthy) {
-      return {
-        tone: "success" as const,
-        title: "Debit/Credit totals detected correctly",
-        detail: "The mapped debit and credit columns contain clean amount values across the uploaded rows.",
-      };
-    }
-
-    return {
-      tone: "warning" as const,
-      title: "Review debit/credit totals",
-      detail: "The mapped debit or credit column still looks incomplete, sparse, or inconsistently formatted.",
-    };
-  }, [
-    userMapping.debit,
-    userMapping.credit,
-    selectedDebitMetric,
-    selectedCreditMetric,
-    columnSampleValidation.debit,
-    columnSampleValidation.credit,
-    isSelected,
-  ]);
-
-  const renderFieldHelper = (key: "date" | "narration" | "reference" | "debit" | "credit") => {
-    const selectedHeader = userMapping[key];
-    const resolvedHeader = isSelected(selectedHeader) ? selectedHeader : undefined;
-    const stats = resolvedHeader ? columnStats[resolvedHeader] : null;
-    const validation = columnSampleValidation[key];
-
-    return (
-      <div className="space-y-1">
-        {(key === "date" || key === "debit" || key === "credit") && validation?.message ? (
-          <p
-            className={`text-[11px] ${
-              validation.ok ? "text-emerald-600" : "text-amber-600"
-            }`}
-          >
-            {validation.message}
-          </p>
-        ) : null}
-        {stats && stats.missing > 0 ? (
-          <p className="text-[11px] text-amber-700">
-            {stats.missing} of {stats.total} sample rows are blank in this column.
-          </p>
-        ) : null}
-      </div>
-    );
+  const renderFieldHelper = (_key: "date" | "narration" | "reference" | "debit" | "credit") => {
+    return null;
   };
 
   const getMappedHeader = (key: "date" | "narration" | "reference" | "debit" | "credit") => {
@@ -713,12 +638,6 @@ export default function MappingStep() {
           </div>
 
           <div className="space-y-4 border-b border-slate-200 bg-slate-50/70 px-6 py-4">
-            <div className="rounded-2xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
-              This screen is the pre-confirm mapping check. After you click `Confirm Mapping`,
-              we return to the upload page and show the full classified preview with `Rows Uploaded`,
-              `Bank Debits`, `Bank Credits`, and the split transaction sections.
-            </div>
-
             <div className="flex flex-wrap items-center gap-3">
               <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
                 <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">
@@ -826,58 +745,6 @@ export default function MappingStep() {
                   Debit/Credit mode detected
                 </div>
               ) : null}
-            </div>
-
-            <div
-              className={`rounded-xl px-3 py-3 ${
-                debitCreditTotalsStatus.tone === "success"
-                  ? "border border-emerald-200 bg-emerald-50"
-                  : debitCreditTotalsStatus.tone === "warning"
-                    ? "border border-amber-200 bg-amber-50"
-                    : "border border-slate-200 bg-white"
-              }`}
-            >
-              <div className="flex items-start gap-2">
-                <Check
-                  className={`mt-0.5 h-4 w-4 ${
-                    debitCreditTotalsStatus.tone === "success"
-                      ? "text-emerald-600"
-                      : debitCreditTotalsStatus.tone === "warning"
-                        ? "text-amber-600"
-                        : "text-slate-400"
-                  }`}
-                />
-                <div>
-                  <p
-                    className={`text-sm font-semibold ${
-                      debitCreditTotalsStatus.tone === "success"
-                        ? "text-emerald-900"
-                        : debitCreditTotalsStatus.tone === "warning"
-                          ? "text-amber-900"
-                          : "text-slate-700"
-                    }`}
-                  >
-                    {debitCreditTotalsStatus.title}
-                  </p>
-                  <p
-                    className={`mt-1 text-xs ${
-                      debitCreditTotalsStatus.tone === "success"
-                        ? "text-emerald-700"
-                        : debitCreditTotalsStatus.tone === "warning"
-                          ? "text-amber-700"
-                          : "text-slate-500"
-                    }`}
-                  >
-                    {debitCreditTotalsStatus.detail}
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-3">
-              <p className="text-xs text-amber-900">
-                Map separate Debit and Credit amount columns only. Single Amount columns are no longer used in this mapping flow.
-              </p>
             </div>
 
             {autoFixSuggestions ? (

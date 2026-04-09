@@ -296,6 +296,73 @@ class ApiClient {
     return this.request(`/api/uploads/session/${sessionId}`);
   }
 
+  async extractDraft(sessionId: string): Promise<ApiResponse<any>> {
+    return this.request(`/api/uploads/extract-draft/${sessionId}`, {
+      method: "POST",
+    });
+  }
+
+  async getDraftBySession(sessionId: string): Promise<ApiResponse<any>> {
+    return this.request(`/api/uploads/draft/by-session/${sessionId}`);
+  }
+
+  async updateDraftMapping(
+    draftId: string,
+    mapping: {
+      date: string;
+      narration: string;
+      reference: string;
+      amount?: string;
+      debit?: string;
+      credit?: string;
+    }
+  ): Promise<ApiResponse<any>> {
+    return this.request(`/api/uploads/draft/${draftId}/mapping`, {
+      method: "PATCH",
+      body: JSON.stringify({ mapping }),
+    });
+  }
+
+  async updateDraftRegion(
+    draftId: string,
+    payload: {
+      header_row_index?: number | null;
+      table_start_row_index?: number | null;
+      table_end_row_index?: number | null;
+    }
+  ): Promise<ApiResponse<any>> {
+    return this.request(`/api/uploads/draft/${draftId}/region`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async updateDraftRows(
+    draftId: string,
+    edits: Array<{
+      row_index: number;
+      cells?: any[];
+      row_type?: string;
+      is_repeated_header?: boolean;
+      is_within_selected_region?: boolean;
+    }>
+  ): Promise<ApiResponse<any>> {
+    return this.request(`/api/uploads/draft/${draftId}/rows`, {
+      method: "PATCH",
+      body: JSON.stringify({ edits }),
+    });
+  }
+
+  async getDraftValidation(draftId: string): Promise<ApiResponse<any>> {
+    return this.request(`/api/uploads/draft/${draftId}/validation`);
+  }
+
+  async finalizeDraft(draftId: string): Promise<ApiResponse<any>> {
+    return this.request(`/api/uploads/draft/${draftId}/finalize`, {
+      method: "POST",
+    });
+  }
+
   async getBankTransactions(sessionId: string): Promise<ApiResponse<any[] | null>> {
     return this.request(`/api/uploads/transactions/${sessionId}/bank`);
   }

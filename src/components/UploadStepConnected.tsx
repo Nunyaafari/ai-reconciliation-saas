@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Upload,
   File,
@@ -17,7 +17,7 @@ import {
 } from "@/store/reconciliation-api";
 import clsx from "clsx";
 import { formatCurrency, normalizeCurrencyCode } from "@/lib/currency";
-import AppBrand from "./AppBrand";
+import { apiClient } from "@/lib/api";
 
 const formatMoney = (value: number, currencyCode?: string | null) =>
   formatCurrency(value, normalizeCurrencyCode(currencyCode));
@@ -53,6 +53,7 @@ export default function UploadStep() {
     reconciliationSession,
     prepareReconciliationContext,
     refreshReconciliation,
+    resumeUploadWorkflow,
     progress,
     matchGroups,
     setStep,
@@ -60,9 +61,51 @@ export default function UploadStep() {
     orgId,
   } = useReconciliationStore();
   const [fileErrors, setFileErrors] = useState<{ bank?: string; book?: string }>({});
+  const [sessionCompletion, setSessionCompletion] = useState<{
+    bank: boolean;
+    book: boolean;
+  }>({ bank: false, book: false });
 
-  const bankMapped = bankTransactions.length > 0;
-  const bookMapped = bookTransactions.length > 0;
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchStatus = async (source: "bank" | "book", sessionId: string | null) => {
+      if (!sessionId) {
+        if (!cancelled) {
+          setSessionCompletion((prev) => ({ ...prev, [source]: false }));
+        }
+        return;
+      }
+
+      try {
+        const response = await apiClient.getUploadSession(sessionId);
+        const standardizedCount = Number(response.data?.rows_standardized || 0);
+        const isComplete = Boolean(
+          response.success &&
+            response.data?.status === "complete" &&
+            standardizedCount > 0
+        );
+        if (!cancelled) {
+          setSessionCompletion((prev) => ({ ...prev, [source]: isComplete }));
+        }
+      } catch (statusError) {
+        console.error(`Failed to load ${source} upload session status`, statusError);
+        if (!cancelled) {
+          setSessionCompletion((prev) => ({ ...prev, [source]: false }));
+        }
+      }
+    };
+
+    fetchStatus("bank", bankSessionId);
+    fetchStatus("book", bookSessionId);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bankSessionId, bookSessionId]);
+
+  const bankMapped = bankTransactions.length > 0 || sessionCompletion.bank;
+  const bookMapped = bookTransactions.length > 0 || sessionCompletion.book;
   const isAdmin = currentUser?.role === "admin";
   const currencyCode = normalizeCurrencyCode(reconSetup?.currencyCode || "GHS");
 
@@ -123,22 +166,42 @@ export default function UploadStep() {
 
   const bankStatus = getStatus("bank");
   const bookStatus = getStatus("book");
+  const hasPreparedTransactions = bankMapped && bookMapped;
+  const bankNeedsReview = Boolean(bankSessionId) && !bankMapped;
+  const bookNeedsReview = Boolean(bookSessionId) && !bookMapped;
+  const hasReconProgress =
+    (reconciliationSession?.id && ((progress || 0) > 0 || matchGroups.length > 0)) ||
+    false;
   const canContinueReconciliation = Boolean(
-    reconciliationSession?.id || (bankSessionId && bookSessionId)
+    hasReconProgress || hasPreparedTransactions
   );
 
   const handleContinueReconciliation = async () => {
     try {
       setError(null);
 
-      if (bankSessionId && bookSessionId) {
-        await prepareReconciliationContext(orgId || undefined);
-      }
-
       const latestState = useReconciliationStore.getState();
       const hasStartedReconPasses =
         (latestState.progress || progress || 0) > 0 ||
         (latestState.matchGroups?.length || matchGroups.length) > 0;
+
+      if (!hasStartedReconPasses && (!bankMapped || !bookMapped)) {
+        const missingSources = [
+          !bankMapped ? "Bank Statement" : null,
+          !bookMapped ? "Cash Book" : null,
+        ].filter(Boolean);
+
+        setError(
+          missingSources.length === 2
+            ? "Finalize both uploads first so transactions are available in the reconciliation worksheet."
+            : `Finalize the ${missingSources[0]} upload first so its transactions are available in the reconciliation worksheet.`
+        );
+        return;
+      }
+
+      if (bankSessionId && bookSessionId) {
+        await prepareReconciliationContext(orgId || undefined);
+      }
 
       if (
         hasStartedReconPasses &&
@@ -178,12 +241,9 @@ export default function UploadStep() {
 
   return (
     <div className="min-h-screen flex items-center justify-center p-6">
-      <div className="w-full max-w-5xl">
+      <div className="w-full max-w-[1400px]">
         {/* Header */}
         <div className="mb-10 text-center">
-          <div className="mb-4 flex justify-center">
-            <AppBrand subtitle="Upload Workspace" />
-          </div>
           <h1 className="text-4xl font-bold text-slate-900 mb-2 tracking-tight">
             Reconcile Faster with AI
           </h1>
@@ -213,6 +273,24 @@ export default function UploadStep() {
               >
                 <CheckCircle2 className="h-3.5 w-3.5" />
                 Continue Recon
+              </button>
+            ) : null}
+            {bankNeedsReview ? (
+              <button
+                onClick={() => resumeUploadWorkflow("bank").catch((err) => console.error("Resume bank workflow error:", err))}
+                className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-3 py-1 font-semibold text-amber-700 hover:bg-amber-100"
+              >
+                <Clock3 className="h-3.5 w-3.5" />
+                Continue Bank Review
+              </button>
+            ) : null}
+            {bookNeedsReview ? (
+              <button
+                onClick={() => resumeUploadWorkflow("book").catch((err) => console.error("Resume cash book workflow error:", err))}
+                className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 font-semibold text-emerald-700 hover:bg-emerald-100"
+              >
+                <Clock3 className="h-3.5 w-3.5" />
+                Continue Cash Book Review
               </button>
             ) : null}
             <span className="inline-flex items-center gap-1 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-blue-700">
@@ -260,6 +338,22 @@ export default function UploadStep() {
                     className="rounded-xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700"
                   >
                     Continue Recon
+                  </button>
+                ) : null}
+                {bankNeedsReview ? (
+                  <button
+                    onClick={() => resumeUploadWorkflow("bank").catch((err) => console.error("Resume bank workflow error:", err))}
+                    className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700 hover:bg-amber-100"
+                  >
+                    Continue Bank Review
+                  </button>
+                ) : null}
+                {bookNeedsReview ? (
+                  <button
+                    onClick={() => resumeUploadWorkflow("book").catch((err) => console.error("Resume cash book workflow error:", err))}
+                    className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700 hover:bg-emerald-100"
+                  >
+                    Continue Cash Book Review
                   </button>
                 ) : null}
                 <button
@@ -440,7 +534,6 @@ function UploadArea({
   disabled = false,
   disabledMessage,
 }: UploadAreaProps) {
-  const [dragActive, setDragActive] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const inputId = useId();
   const variant = title === "Bank Statement" ? "blue" : "green";
@@ -465,25 +558,6 @@ function UploadArea({
 
   const style = styles[variant];
 
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDragActive(false);
-    if (disabled) return;
-    const files = e.dataTransfer.files;
-    if (files.length > 0) {
-      const file = files[0];
-      const lowerName = file.name.toLowerCase();
-      if (
-        file.type.includes("pdf") ||
-        lowerName.endsWith(".xlsx") ||
-        lowerName.endsWith(".xls") ||
-        lowerName.endsWith(".csv")
-      ) {
-        onUpload(file);
-      }
-    }
-  };
-
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (disabled) return;
     const files = e.target.files;
@@ -495,25 +569,31 @@ function UploadArea({
 
   const openFilePicker = () => {
     if (disabled || (loading && status === "uploading")) return;
-    if (typeof inputRef.current?.showPicker === "function") {
-      inputRef.current.showPicker();
-      return;
-    }
     inputRef.current?.click();
   };
 
+  const canOpenPicker = !disabled && !(loading && status === "uploading");
+
   return (
     <div
-      onDragEnter={() => setDragActive(true)}
-      onDragLeave={() => setDragActive(false)}
-      onDrop={handleDrop}
-      onDragOver={(e) => e.preventDefault()}
+      role={canOpenPicker ? "button" : undefined}
+      tabIndex={canOpenPicker ? 0 : -1}
+      onClick={() => {
+        if (canOpenPicker) openFilePicker();
+      }}
+      onKeyDown={(event) => {
+        if (!canOpenPicker) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openFilePicker();
+        }
+      }}
       className={clsx(
-        "rounded-2xl border-2 border-dashed bg-white p-4 shadow-sm transition-all sm:p-5",
+        "rounded-2xl border-2 border-dashed bg-white p-3 shadow-sm transition-all sm:p-4",
         disabled
           ? "cursor-not-allowed opacity-70"
-          : "hover:-translate-y-0.5 hover:shadow-md",
-        dragActive ? style.drag : style.idle,
+          : "cursor-pointer hover:-translate-y-0.5 hover:shadow-md",
+        style.idle,
         status === "mapped" && "border-emerald-400 bg-emerald-50/40"
       )}
     >
@@ -529,24 +609,24 @@ function UploadArea({
       <div className="text-center">
         <div
           className={clsx(
-            "mb-2 inline-flex h-10 w-10 items-center justify-center rounded-2xl",
+            "mb-2 inline-flex h-9 w-9 items-center justify-center rounded-xl",
             style.iconBg
           )}
         >
           {status === "uploading" ? (
-            <Loader className={clsx("w-6 h-6 animate-spin", style.iconText)} />
+            <Loader className={clsx("w-5 h-5 animate-spin", style.iconText)} />
           ) : status === "mapped" ? (
-            <CheckCircle2 className="w-6 h-6 text-emerald-600" />
+            <CheckCircle2 className="w-5 h-5 text-emerald-600" />
           ) : status === "uploaded" ? (
-            <Clock3 className="w-6 h-6 text-amber-600" />
+            <Clock3 className="w-5 h-5 text-amber-600" />
           ) : (
-            <File className={clsx("w-6 h-6", style.iconText)} />
+            <File className={clsx("w-5 h-5", style.iconText)} />
           )}
         </div>
-        <h3 className="font-semibold text-slate-900 mb-1">
+        <h3 className="font-semibold text-slate-900 mb-1 text-sm">
           {icon} {title}
         </h3>
-        <p className="mb-2 text-xs text-slate-500">
+        <p className="mb-2 text-[10px] text-slate-500">
           {status === "mapped"
             ? "Mapped and ready"
             : status === "uploaded"
@@ -555,34 +635,14 @@ function UploadArea({
             ? "Uploading..."
             : "PDF, XLSX, or CSV format"}
         </p>
-        <div className="mb-2 flex items-center justify-center gap-1 text-[10px] text-slate-400">
-          <span>Accepted: PDF, XLSX, CSV · Max size 10MB</span>
-          <span className="relative group">
-            <Info className="w-3.5 h-3.5 text-slate-400" />
-            <span className="absolute right-0 top-5 hidden group-hover:block whitespace-nowrap rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-600 shadow-lg">
-              Files over 10MB or non-PDF/XLSX/CSV formats will be rejected.
-            </span>
-          </span>
-        </div>
-        <div className="mb-1 flex items-center justify-center gap-2">
-          <Upload className={clsx("w-4 h-4", style.actionText)} />
-          <span className={clsx("text-sm font-medium", style.actionText)}>
-            {disabled && disabledMessage
-              ? disabledMessage
-              : status === "mapped"
-              ? "Replace file"
-              : status === "uploaded"
-              ? "Replace file"
-              : status === "uploading"
-              ? "Uploading..."
-              : "Click to upload or drag"}
-          </span>
-        </div>
         {!disabled ? (
-          <div className="mb-2 space-y-1.5">
+          <div className="mb-2">
             <button
               type="button"
-              onClick={openFilePicker}
+              onClick={(event) => {
+                event.stopPropagation();
+                openFilePicker();
+              }}
               className={clsx(
                 "inline-flex items-center gap-2 rounded-xl border px-3 py-1.5 text-[11px] font-semibold transition",
                 loading && status === "uploading"
@@ -592,20 +652,20 @@ function UploadArea({
               disabled={loading && status === "uploading"}
             >
               <Upload className="h-3.5 w-3.5" />
-              Choose file
+              {disabled && disabledMessage
+                ? disabledMessage
+                : status === "mapped" || status === "uploaded"
+                ? "Replace file"
+                : status === "uploading"
+                ? "Uploading..."
+                : "Choose file"}
             </button>
-            <label
-              htmlFor={inputId}
-              className="mx-auto flex w-full max-w-xs cursor-pointer items-center justify-center rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 text-[10px] font-medium text-slate-500 hover:bg-slate-100"
-            >
-              Native file picker fallback
-            </label>
           </div>
         ) : null}
         {errorMessage ? (
-          <p className="text-xs text-rose-600">{errorMessage}</p>
+          <p className="text-[11px] text-rose-600">{errorMessage}</p>
         ) : (
-          <div className="text-xs text-slate-500">
+          <div className="text-[11px] text-slate-500">
             {fileName ? (
               <div className="flex items-center justify-center gap-2">
                 <span className="truncate max-w-[160px]">{fileName}</span>
@@ -769,7 +829,7 @@ function TransactionDirectionPanel({
         <span className="text-right">{amountLabel}</span>
       </div>
 
-      <div className="max-h-[420px] overflow-y-auto bg-white">
+      <div className="max-h-[640px] overflow-y-auto bg-white">
         {transactions.length === 0 ? (
           <div className="px-4 py-10 text-center text-sm text-slate-500">
             {emptyMessage}

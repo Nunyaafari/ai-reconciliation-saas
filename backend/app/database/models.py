@@ -40,6 +40,11 @@ class Organization(Base):
         back_populates="organization",
         cascade="all, delete-orphan",
     )
+    extraction_drafts = relationship(
+        "ExtractionDraft",
+        back_populates="organization",
+        cascade="all, delete-orphan",
+    )
     audit_logs = relationship(
         "AuditLog",
         back_populates="organization",
@@ -308,6 +313,11 @@ class UploadSession(Base):
     organization = relationship("Organization", back_populates="upload_sessions")
     bank_transactions = relationship("BankTransaction", foreign_keys=[BankTransaction.upload_session_id])
     book_transactions = relationship("BookTransaction", foreign_keys=[BookTransaction.upload_session_id])
+    extraction_drafts = relationship(
+        "ExtractionDraft",
+        back_populates="upload_session",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         Index("ix_upload_sessions_org_id", "org_id"),
@@ -409,6 +419,73 @@ class ProcessingJob(Base):
         Index("ix_processing_jobs_upload_session_id", "upload_session_id"),
         Index("ix_processing_jobs_status", "status"),
         Index("ix_processing_jobs_job_type", "job_type"),
+    )
+
+
+class ExtractionDraft(Base):
+    """Persisted PDF extraction draft for review before standardization."""
+
+    __tablename__ = "extraction_drafts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    upload_session_id = Column(UUID(as_uuid=True), ForeignKey("upload_sessions.id"), nullable=False)
+    version = Column(Integer, nullable=False, default=1)
+    source_method = Column(String(100), nullable=False)
+    confidence = Column(Integer, nullable=False, default=0)
+    status = Column(
+        SQLEnum("draft", "reviewed", "finalized", "superseded", name="draft_status"),
+        nullable=False,
+        default="draft",
+    )
+    column_headers_json = Column(Text, nullable=False, default="[]")
+    mapped_fields_json = Column(Text, nullable=False, default="{}")
+    raw_rows_json = Column(Text, nullable=False, default="[]")
+    reviewed_rows_json = Column(Text, nullable=False, default="[]")
+    validation_summary_json = Column(Text, nullable=False, default="{}")
+    header_row_index = Column(Integer, nullable=True)
+    table_start_row_index = Column(Integer, nullable=True)
+    table_end_row_index = Column(Integer, nullable=True)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    updated_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    finalized_at = Column(DateTime, nullable=True)
+
+    organization = relationship("Organization", back_populates="extraction_drafts")
+    upload_session = relationship("UploadSession", back_populates="extraction_drafts")
+    edits = relationship(
+        "ExtractionDraftEdit",
+        back_populates="draft",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("ix_extraction_drafts_org_id", "org_id"),
+        Index("ix_extraction_drafts_upload_session_id", "upload_session_id"),
+        Index("ix_extraction_drafts_status", "status"),
+    )
+
+
+class ExtractionDraftEdit(Base):
+    """Audit log for changes applied to an extraction draft."""
+
+    __tablename__ = "extraction_draft_edits"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    draft_id = Column(UUID(as_uuid=True), ForeignKey("extraction_drafts.id"), nullable=False)
+    org_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id"), nullable=False)
+    action_type = Column(String(100), nullable=False)
+    payload_json = Column(Text, nullable=False, default="{}")
+    created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    draft = relationship("ExtractionDraft", back_populates="edits")
+    organization = relationship("Organization")
+
+    __table_args__ = (
+        Index("ix_extraction_draft_edits_draft_id", "draft_id"),
+        Index("ix_extraction_draft_edits_org_id", "org_id"),
     )
 
 

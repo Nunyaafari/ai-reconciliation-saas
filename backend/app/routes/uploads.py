@@ -18,8 +18,10 @@ from app.database import get_db
 from app.database.models import (
     Organization,
     UploadSession,
+    ReconciliationSession,
     BankTransaction,
     BookTransaction,
+    ExtractionDraft,
     MatchGroup,
     User,
 )
@@ -33,12 +35,19 @@ from app.schemas import (
     ColumnMapping,
     BankTransactionResponse,
     BookTransactionResponse,
+    ExtractionDraftResponse,
+    ExtractionDraftMappingUpdateRequest,
+    ExtractionDraftRegionUpdateRequest,
+    ExtractionDraftRowsUpdateRequest,
+    ExtractionDraftValidationSummary,
+    ExtractionDraftFinalizeResponse,
 )
 from app.services.extraction_service import ExtractionService
 from app.services.audit_service import audit_service
 from app.services.file_storage_service import file_storage_service
 from app.services.job_service import job_service, queue_extraction_job
 from app.services.processing_service import ProcessingService
+from app.services.pdf_draft_review_service import PdfDraftReviewService
 from app.services.standardization_service import StandardizationService
 
 router = APIRouter(prefix="/api/uploads", tags=["Uploads"])
@@ -47,6 +56,7 @@ logger = logging.getLogger(__name__)
 extraction_service = ExtractionService()
 processing_service = ProcessingService()
 standardization_service = StandardizationService()
+pdf_draft_review_service = PdfDraftReviewService()
 
 
 # ===== HELPER FUNCTIONS =====
@@ -114,6 +124,14 @@ def clear_existing_session_transactions(session: UploadSession, db: Session) -> 
     ).delete(synchronize_session=False)
 
 
+def ensure_pdf_upload_session(session: UploadSession) -> None:
+    if session.file_type != "pdf":
+        raise HTTPException(
+            status_code=400,
+            detail="Extraction drafts are only available for PDF uploads.",
+        )
+
+
 def validate_period_month(period_month: str) -> str:
     period = (period_month or "").strip()
     if not period:
@@ -179,6 +197,22 @@ async def create_upload_session(
     if not normalized_account_name:
         raise HTTPException(status_code=400, detail="Account name is required")
     normalized_period_month = validate_period_month(period_month)
+
+    closed_reconciliation_session = (
+        db.query(ReconciliationSession)
+        .filter(
+            ReconciliationSession.org_id == org_id,
+            ReconciliationSession.account_name == normalized_account_name,
+            ReconciliationSession.period_month == normalized_period_month,
+            ReconciliationSession.status == "closed",
+        )
+        .first()
+    )
+    if closed_reconciliation_session:
+        raise HTTPException(
+            status_code=400,
+            detail="This reconciliation month is closed. Reopen a new month to add records.",
+        )
 
     # Validate file type
     allowed_types = {"pdf", "xlsx", "xls", "csv"}
@@ -320,6 +354,52 @@ async def extract_data(
         raise HTTPException(status_code=400, detail=f"Extraction failed: {str(e)}")
 
 
+@router.post("/extract-draft/{session_id}", response_model=ExtractionDraftResponse)
+async def extract_draft(
+    session_id: UUID,
+    file: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Create or resume a persisted PDF extraction draft for review."""
+    session = get_upload_session_or_404(session_id, db, current_user)
+    ensure_pdf_upload_session(session)
+
+    try:
+        file_content = await resolve_session_file_content(session, file)
+        return pdf_draft_review_service.build_or_get_draft(
+            session=session,
+            file_content=file_content,
+            current_user=current_user,
+            db=db,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Draft extraction failed for session %s: %s", session_id, str(e))
+        raise HTTPException(status_code=400, detail=f"Draft extraction failed: {str(e)}")
+
+
+@router.get("/draft/by-session/{session_id}", response_model=ExtractionDraftResponse)
+async def get_active_draft_for_session(
+    session_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Fetch the latest active extraction draft for a PDF upload session."""
+    session = get_upload_session_or_404(session_id, db, current_user)
+    ensure_pdf_upload_session(session)
+
+    draft = pdf_draft_review_service.get_active_draft_for_session(
+        session_id=session.id,
+        org_id=session.org_id,
+        db=db,
+    )
+    if not draft:
+        raise HTTPException(status_code=404, detail="No active extraction draft found")
+    return pdf_draft_review_service.serialize_draft(draft)
+
+
 @router.post("/extract-async/{session_id}", response_model=ProcessingJobResponse)
 async def extract_data_async(
     session_id: UUID,
@@ -379,6 +459,116 @@ async def extract_data_async(
     return job_service.serialize_job(job)
 
 
+@router.patch("/draft/{draft_id}/mapping", response_model=ExtractionDraftResponse)
+async def update_draft_mapping(
+    draft_id: UUID,
+    payload: ExtractionDraftMappingUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        draft = pdf_draft_review_service.get_draft_or_404(
+            draft_id=draft_id,
+            org_id=current_user.org_id,
+            db=db,
+        )
+        return pdf_draft_review_service.update_mapping(
+            draft=draft,
+            mapping=payload.mapping,
+            current_user=current_user,
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.patch("/draft/{draft_id}/region", response_model=ExtractionDraftResponse)
+async def update_draft_region(
+    draft_id: UUID,
+    payload: ExtractionDraftRegionUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        draft = pdf_draft_review_service.get_draft_or_404(
+            draft_id=draft_id,
+            org_id=current_user.org_id,
+            db=db,
+        )
+        return pdf_draft_review_service.update_region(
+            draft=draft,
+            payload=payload,
+            current_user=current_user,
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.patch("/draft/{draft_id}/rows", response_model=ExtractionDraftResponse)
+async def update_draft_rows(
+    draft_id: UUID,
+    payload: ExtractionDraftRowsUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        draft = pdf_draft_review_service.get_draft_or_404(
+            draft_id=draft_id,
+            org_id=current_user.org_id,
+            db=db,
+        )
+        return pdf_draft_review_service.update_rows(
+            draft=draft,
+            payload=payload,
+            current_user=current_user,
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/draft/{draft_id}/validation", response_model=ExtractionDraftValidationSummary)
+async def get_draft_validation(
+    draft_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        draft = pdf_draft_review_service.get_draft_or_404(
+            draft_id=draft_id,
+            org_id=current_user.org_id,
+            db=db,
+        )
+        return pdf_draft_review_service.validate_draft(draft)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/draft/{draft_id}/finalize", response_model=ExtractionDraftFinalizeResponse)
+async def finalize_draft(
+    draft_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    try:
+        draft = pdf_draft_review_service.get_draft_or_404(
+            draft_id=draft_id,
+            org_id=current_user.org_id,
+            db=db,
+        )
+        session = get_upload_session_or_404(draft.upload_session_id, db, current_user)
+        ensure_pdf_upload_session(session)
+        return pdf_draft_review_service.finalize_draft(
+            draft=draft,
+            session=session,
+            current_user=current_user,
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.post("/confirm-mapping/{session_id}", response_model=dict)
 async def confirm_mapping(
     session_id: UUID,
@@ -413,6 +603,12 @@ async def confirm_mapping(
                 ),
             )
         mapping.amount = None
+
+        if session.file_type == "pdf":
+            raise HTTPException(
+                status_code=400,
+                detail="PDF uploads now use the draft review workflow. Finalize the extraction draft instead of confirm-mapping.",
+            )
 
         # Read full file from persistent storage whenever possible
         file_content = await resolve_session_file_content(session, file)

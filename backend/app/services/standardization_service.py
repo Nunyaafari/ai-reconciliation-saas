@@ -186,14 +186,25 @@ class StandardizationService:
             "%d/%m/%Y",  # EU: 15/01/2025
             "%m-%d-%Y",  # 01-15-2025
             "%d-%m-%Y",  # 15-01-2025
+            "%d-%m-%y",  # 15-01-25
             "%Y-%m-%d",  # ISO: 2025-01-15
             "%Y/%m/%d",  # 2025/01/15
             "%d.%m.%Y",  # German: 15.01.2025
             "%B %d, %Y",  # January 15, 2025
             "%b %d, %Y",  # Jan 15, 2025
+            "%d-%b-%Y",  # 20-Jan-2026
+            "%d-%B-%Y",  # 20-January-2026
+            "%d-%b-%y",  # 20-Jan-26
+            "%d %b %Y",  # 20 Jan 2026
+            "%d %B %Y",  # 20 January 2026
+            "%d/%b/%Y",  # 20/Jan/2026
+            "%d/%B/%Y",  # 20/January/2026
+            "%d%b%Y",  # 20Jan2026
+            "%d%B%Y",  # 20January2026
         ]
 
         date_str = str(date_str).strip()
+        date_str = re.sub(r"\s+", " ", date_str)
 
         for fmt in date_formats:
             try:
@@ -202,7 +213,17 @@ class StandardizationService:
             except ValueError:
                 continue
 
-        # If still not parsed, try common separators
+        # Try compact "20Jan2026" / "20JAN2026" style with punctuation stripped.
+        compact = re.sub(r"[^A-Za-z0-9]", "", date_str)
+        if compact and compact != date_str:
+            for fmt in ("%d%b%Y", "%d%B%Y", "%Y%m%d", "%d%m%Y"):
+                try:
+                    parsed_date = datetime.strptime(compact, fmt)
+                    return parsed_date.strftime("%Y-%m-%d")
+                except ValueError:
+                    continue
+
+        # If still not parsed, give up.
         logger.warning(f"Could not parse date: {date_str}")
         return None
 
@@ -239,9 +260,13 @@ class StandardizationService:
         if is_negative:
             amount_str = amount_str[1:-1]
 
-        # Remove commas (thousands separator) + any letters like CR/DR
+        # Remove commas plus explicit currency/direction labels without
+        # accidentally converting references like TXN001 into numeric amounts.
         amount_str = amount_str.replace(",", "")
-        amount_str = re.sub(r"[A-Za-z]", "", amount_str)
+        amount_str = re.sub(r"^(?:[A-Z]{2,4}\s+)", "", amount_str, flags=re.IGNORECASE)
+        amount_str = re.sub(r"^(?:CR|DR|CREDIT|DEBIT)\s+", "", amount_str, flags=re.IGNORECASE)
+        amount_str = re.sub(r"\s+(?:CR|DR|CREDIT|DEBIT)$", "", amount_str, flags=re.IGNORECASE)
+        amount_str = amount_str.replace(" ", "")
 
         try:
             amount = Decimal(amount_str)
@@ -321,6 +346,20 @@ class StandardizationService:
         fingerprint_data = f"{file_name}_{len(file_content)}".encode()
         return hashlib.sha256(fingerprint_data).hexdigest()
 
+    def calculate_template_hash(
+        self,
+        file_name: str,
+        file_source: str,
+        column_headers: List[str],
+        source_method: str = "",
+    ) -> str:
+        """Calculate a reusable PDF template signature from layout cues."""
+        stem = re.sub(r"\d+", "#", (file_name or "").lower())
+        stem = re.sub(r"[^a-z#]+", " ", stem).strip()
+        headers = "|".join(h.strip().lower() for h in column_headers if str(h).strip())
+        payload = f"{file_source}|{stem}|{headers}|{source_method}".encode()
+        return hashlib.sha256(payload).hexdigest()
+
     def save_fingerprint(
         self,
         org_id: str,
@@ -361,3 +400,83 @@ class StandardizationService:
             db.add(fingerprint)
             db.commit()
             logger.info(f"Saved new fingerprint for {file_name}")
+
+    def get_pdf_template(
+        self,
+        org_id: str,
+        file_name: str,
+        file_source: str,
+        column_headers: List[str],
+        source_method: str,
+        db: Session,
+    ) -> IngestionFingerprint | None:
+        template_hash = self.calculate_template_hash(
+            file_name=file_name,
+            file_source=file_source,
+            column_headers=column_headers,
+            source_method=source_method,
+        )
+        return (
+            db.query(IngestionFingerprint)
+            .filter(
+                IngestionFingerprint.org_id == org_id,
+                IngestionFingerprint.file_hash == template_hash,
+                IngestionFingerprint.file_source == file_source,
+            )
+            .order_by(IngestionFingerprint.uses_count.desc(), IngestionFingerprint.last_used_at.desc())
+            .first()
+        )
+
+    def save_pdf_template(
+        self,
+        org_id: str,
+        file_name: str,
+        file_source: str,
+        column_headers: List[str],
+        column_mapping: ColumnMapping,
+        source_method: str,
+        metadata: Dict[str, Any],
+        db: Session,
+    ) -> None:
+        """Persist reusable PDF layout/template cues for future drafts."""
+        template_hash = self.calculate_template_hash(
+            file_name=file_name,
+            file_source=file_source,
+            column_headers=column_headers,
+            source_method=source_method,
+        )
+
+        existing = (
+            db.query(IngestionFingerprint)
+            .filter(
+                IngestionFingerprint.org_id == org_id,
+                IngestionFingerprint.file_hash == template_hash,
+                IngestionFingerprint.file_source == file_source,
+            )
+            .first()
+        )
+
+        if existing:
+            existing.file_name = file_name
+            existing.column_map = column_mapping.model_dump_json()
+            existing.ai_rules = json.dumps(metadata)
+            existing.confidence = int(metadata.get("confidence", existing.confidence or 85))
+            existing.uses_count = (existing.uses_count or 0) + 1
+            existing.last_used_at = datetime.utcnow()
+            db.commit()
+            logger.info("Updated PDF template for %s", file_name)
+            return
+
+        fingerprint = IngestionFingerprint(
+            org_id=org_id,
+            file_hash=template_hash,
+            file_name=file_name,
+            file_source=file_source,
+            column_map=column_mapping.model_dump_json(),
+            ai_rules=json.dumps(metadata),
+            confidence=int(metadata.get("confidence", 85)),
+            uses_count=1,
+        )
+        db.add(fingerprint)
+        db.commit()
+        logger.info("Saved new PDF template for %s", file_name)

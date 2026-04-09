@@ -155,6 +155,53 @@ export type ExtractionResult = {
       parsedAmountTotal: number;
     }
   >;
+  draft?: ExtractionDraft | null;
+};
+
+export type ExtractionDraftRow = {
+  rowIndex: number;
+  cells: any[];
+  rowType: "header" | "transaction" | "footer" | "summary" | "unknown" | "deleted";
+  warnings: string[];
+  confidence: number;
+  isRepeatedHeader: boolean;
+  isWithinSelectedRegion: boolean;
+  provenance?: string | null;
+};
+
+export type ExtractionDraftValidationIssue = {
+  code: string;
+  severity: "blocking" | "warning" | "info";
+  message: string;
+  rowIndices: number[];
+};
+
+export type ExtractionDraftValidationSummary = {
+  totals: Record<string, number>;
+  parseCoverage: Record<string, number>;
+  suspiciousRowCount: number;
+  issues: ExtractionDraftValidationIssue[];
+};
+
+export type ExtractionDraft = {
+  id: string;
+  uploadSessionId: string;
+  orgId: string;
+  version: number;
+  sourceMethod: string;
+  confidence: number;
+  status: string;
+  columnHeaders: string[];
+  mappedFields: ColumnMapping;
+  rawRows: ExtractionDraftRow[];
+  reviewedRows: ExtractionDraftRow[];
+  headerRowIndex?: number | null;
+  tableStartRowIndex?: number | null;
+  tableEndRowIndex?: number | null;
+  validationSummary: ExtractionDraftValidationSummary;
+  createdAt: string;
+  updatedAt: string;
+  finalizedAt?: string | null;
 };
 
 export type ProcessingJob = {
@@ -200,6 +247,106 @@ const toNumber = (value: any) => {
   const parsed =
     typeof value === "number" ? value : parseFloat(String(value ?? "0"));
   return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const parseAmount = (value: any): number | null => {
+  if (value == null) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+
+  let cleaned = raw.replace(/,/g, "").replace(/\$/g, "").replace(/\s+/g, "");
+  let negative = false;
+  if (cleaned.startsWith("(") && cleaned.endsWith(")")) {
+    negative = true;
+    cleaned = cleaned.slice(1, -1);
+  }
+  if (cleaned.startsWith("-")) {
+    negative = true;
+    cleaned = cleaned.slice(1);
+  }
+
+  const parsed = Number(cleaned);
+  if (!Number.isFinite(parsed)) return null;
+  return negative ? -parsed : parsed;
+};
+
+const buildColumnMetricsFromRows = (
+  rawData: any[][],
+  columnHeaders: string[]
+): Record<
+  string,
+  { nonEmptyCount: number; parsedAmountCount: number; parsedAmountTotal: number }
+> => {
+  const metrics: Record<
+    string,
+    { nonEmptyCount: number; parsedAmountCount: number; parsedAmountTotal: number }
+  > = {};
+
+  columnHeaders.forEach((header, idx) => {
+    let nonEmptyCount = 0;
+    let parsedAmountCount = 0;
+    let parsedAmountTotal = 0;
+
+    rawData.forEach((row) => {
+      const value = Array.isArray(row) ? row[idx] : undefined;
+      if (value == null || String(value).trim() === "") return;
+      nonEmptyCount += 1;
+      const amount = parseAmount(value);
+      if (amount != null) {
+        parsedAmountCount += 1;
+        parsedAmountTotal += amount;
+      }
+    });
+
+    metrics[header] = {
+      nonEmptyCount,
+      parsedAmountCount,
+      parsedAmountTotal: Number(parsedAmountTotal.toFixed(2)),
+    };
+  });
+
+  return metrics;
+};
+
+const buildPdfPreviewRowsFromDraft = (draft: ExtractionDraft | null): any[][] => {
+  if (!draft) return [];
+
+  const candidateRows =
+    draft.reviewedRows?.length > 0 ? draft.reviewedRows : draft.rawRows || [];
+  if (!candidateRows.length) return [];
+
+  let filteredRows = candidateRows.filter((row) => row.rowType !== "deleted");
+
+  const hasSelectedRegionRows = filteredRows.some(
+    (row) => row.isWithinSelectedRegion
+  );
+  if (hasSelectedRegionRows) {
+    filteredRows = filteredRows.filter((row) => row.isWithinSelectedRegion);
+  } else {
+    const startIndexCandidates: number[] = [];
+    if (typeof draft.tableStartRowIndex === "number") {
+      startIndexCandidates.push(draft.tableStartRowIndex);
+    }
+    if (typeof draft.headerRowIndex === "number") {
+      startIndexCandidates.push(draft.headerRowIndex + 1);
+    }
+    if (startIndexCandidates.length > 0) {
+      const startIndex = Math.max(...startIndexCandidates);
+      filteredRows = filteredRows.filter((row) => row.rowIndex >= startIndex);
+    }
+  }
+
+  const transactionRows = filteredRows.filter((row) => row.rowType === "transaction");
+  if (transactionRows.length > 0) {
+    return transactionRows.map((row) => row.cells);
+  }
+
+  const nonMetadataRows = filteredRows.filter(
+    (row) => row.rowType !== "header" && row.rowType !== "footer"
+  );
+  return (nonMetadataRows.length > 0 ? nonMetadataRows : filteredRows).map(
+    (row) => row.cells
+  );
 };
 
 const mapTransaction = (
@@ -424,6 +571,73 @@ const mapProcessingJob = (job: any): ProcessingJob | null => {
   };
 };
 
+const mapDraftRow = (row: any): ExtractionDraftRow => ({
+  rowIndex: Number(row.row_index ?? row.rowIndex ?? 0),
+  cells: Array.isArray(row.cells) ? row.cells : [],
+  rowType: row.row_type || row.rowType || "unknown",
+  warnings: Array.isArray(row.warnings) ? row.warnings : [],
+  confidence: Number(row.confidence || 0),
+  isRepeatedHeader: Boolean(row.is_repeated_header ?? row.isRepeatedHeader),
+  isWithinSelectedRegion: Boolean(
+    row.is_within_selected_region ?? row.isWithinSelectedRegion
+  ),
+  provenance: row.provenance || null,
+});
+
+const mapDraftValidationSummary = (summary: any): ExtractionDraftValidationSummary => ({
+  totals: Object.fromEntries(
+    Object.entries(summary?.totals || {}).map(([key, value]) => [key, toNumber(value)])
+  ),
+  parseCoverage: Object.fromEntries(
+    Object.entries(summary?.parse_coverage || summary?.parseCoverage || {}).map(([key, value]) => [
+      key,
+      toNumber(value),
+    ])
+  ),
+  suspiciousRowCount: Number(summary?.suspicious_row_count ?? summary?.suspiciousRowCount ?? 0),
+  issues: (summary?.issues || []).map((issue: any) => ({
+    code: issue.code,
+    severity: issue.severity || "warning",
+    message: issue.message,
+    rowIndices: (issue.row_indices || issue.rowIndices || []).map(Number),
+  })),
+});
+
+const mapExtractionDraft = (draft: any): ExtractionDraft | null => {
+  if (!draft) return null;
+  return {
+    id: String(draft.id),
+    uploadSessionId: String(draft.upload_session_id || draft.uploadSessionId),
+    orgId: String(draft.org_id || draft.orgId),
+    version: Number(draft.version || 1),
+    sourceMethod: draft.source_method || draft.sourceMethod || "unknown",
+    confidence: Number(draft.confidence || 0),
+    status: draft.status || "draft",
+    columnHeaders: Array.isArray(draft.column_headers || draft.columnHeaders)
+      ? (draft.column_headers || draft.columnHeaders)
+      : [],
+    mappedFields: draft.mapped_fields || draft.mappedFields || {
+      date: "",
+      narration: "",
+      reference: "",
+      debit: undefined,
+      credit: undefined,
+    },
+    rawRows: (draft.raw_rows || draft.rawRows || []).map(mapDraftRow),
+    reviewedRows: (draft.reviewed_rows || draft.reviewedRows || []).map(mapDraftRow),
+    headerRowIndex: draft.header_row_index ?? draft.headerRowIndex ?? null,
+    tableStartRowIndex:
+      draft.table_start_row_index ?? draft.tableStartRowIndex ?? null,
+    tableEndRowIndex: draft.table_end_row_index ?? draft.tableEndRowIndex ?? null,
+    validationSummary: mapDraftValidationSummary(
+      draft.validation_summary || draft.validationSummary || {}
+    ),
+    createdAt: draft.created_at || draft.createdAt,
+    updatedAt: draft.updated_at || draft.updatedAt,
+    finalizedAt: draft.finalized_at || draft.finalizedAt || null,
+  };
+};
+
 const mapAuthUser = (user: any): AuthUser | null => {
   if (!user) return null;
   return {
@@ -484,7 +698,7 @@ const waitForProcessingJob = async (
 
 export type ReconciliationStore = {
   // State
-  step: "setup" | "upload" | "mapping" | "prepare" | "reconciliation" | "workspace" | "history" | "settings" | "ops" | "complete";
+  step: "setup" | "upload" | "mapping" | "review" | "prepare" | "reconciliation" | "workspace" | "history" | "settings" | "ops" | "complete";
   bankTransactions: Transaction[];
   bookTransactions: Transaction[];
   matchGroups: MatchGroup[];
@@ -506,6 +720,7 @@ export type ReconciliationStore = {
   summary: ReconciliationSummary | null;
   historySessions: ReconciliationSession[];
   activeJob: ProcessingJob | null;
+  currentDraft: ExtractionDraft | null;
 
   // UI State
   loading: boolean;
@@ -529,6 +744,7 @@ export type ReconciliationStore = {
   setError: (error: string | null) => void;
   setProgress: (progress: number) => void;
   beginNewRecon: (setup: ReconSetup) => void;
+  resumeUploadWorkflow: (source: "bank" | "book") => Promise<void>;
 
   // Async Actions
   initOrg: () => Promise<string>;
@@ -551,6 +767,28 @@ export type ReconciliationStore = {
     mapping: ColumnMapping,
     source: "bank" | "book"
   ) => Promise<void>;
+  loadOrCreateDraft: (sessionId: string) => Promise<ExtractionDraft>;
+  updateDraftMapping: (draftId: string, mapping: ColumnMapping) => Promise<ExtractionDraft>;
+  updateDraftRegion: (
+    draftId: string,
+    payload: {
+      headerRowIndex?: number | null;
+      tableStartRowIndex?: number | null;
+      tableEndRowIndex?: number | null;
+    }
+  ) => Promise<ExtractionDraft>;
+  updateDraftRows: (
+    draftId: string,
+    edits: Array<{
+      rowIndex: number;
+      cells?: any[];
+      rowType?: ExtractionDraftRow["rowType"];
+      isRepeatedHeader?: boolean;
+      isWithinSelectedRegion?: boolean;
+    }>
+  ) => Promise<ExtractionDraft>;
+  refreshDraftValidation: (draftId: string) => Promise<ExtractionDraftValidationSummary>;
+  finalizeDraft: (draftId: string, source: "bank" | "book") => Promise<void>;
   loadReconciliationHistory: () => Promise<void>;
   openHistorySession: (
     session: ReconciliationSession,
@@ -629,6 +867,7 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
   summary: null,
   historySessions: [],
   activeJob: null,
+  currentDraft: null,
   loading: false,
   error: null,
   progress: 0,
@@ -670,6 +909,7 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
       reconciliationSession: null,
       summary: null,
       activeJob: null,
+      currentDraft: null,
       loading: false,
       error: null,
       progress: 0,
@@ -679,6 +919,54 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
       currentUser: state.currentUser,
       currentOrganization: state.currentOrganization,
     })),
+  resumeUploadWorkflow: async (source) => {
+    const sessionId = source === "bank" ? get().bankSessionId : get().bookSessionId;
+    if (!sessionId) {
+      return;
+    }
+
+    set({
+      loading: true,
+      error: null,
+      currentMappingSource: source,
+    });
+
+    try {
+      const sessionResponse = await apiClient.getUploadSession(sessionId);
+      if (!sessionResponse.success || !sessionResponse.data?.file_type) {
+        throw new Error(sessionResponse.error || "Failed to load upload session");
+      }
+
+      const fileType = String(sessionResponse.data.file_type).toLowerCase();
+      if (fileType === "pdf") {
+        const draftResponse = await apiClient.getDraftBySession(sessionId);
+        if (draftResponse.success) {
+          const draft = mapExtractionDraft(draftResponse.data);
+          if (draft) {
+            set({
+              currentDraft: draft,
+              loading: false,
+              step: draft.status === "reviewed" ? "review" : "mapping",
+            });
+            return;
+          }
+        } else if (draftResponse.status !== 404) {
+          throw new Error(draftResponse.error || "Failed to load extraction draft");
+        }
+      }
+
+      set({
+        currentDraft: null,
+        loading: false,
+        step: "mapping",
+      });
+    } catch (error) {
+      const errorMsg =
+        error instanceof Error ? error.message : "Failed to open upload workflow";
+      set({ error: errorMsg, loading: false });
+      throw error;
+    }
+  },
   logActivity: (entry) =>
     set((state) => ({
       activityLog: [entry, ...state.activityLog].slice(0, 20),
@@ -902,6 +1190,11 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
           uploadedFileName: file.name,
           currentMappingSource: shouldOpenMapping ? "bank" : null,
           bankTransactions: shouldOpenMapping ? [] : get().bankTransactions,
+          currentDraft:
+            shouldOpenMapping &&
+            get().currentDraft?.uploadSessionId === sessionId
+              ? get().currentDraft
+              : null,
         });
       } else {
         set({
@@ -910,6 +1203,11 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
           uploadedFileName: file.name,
           currentMappingSource: shouldOpenMapping ? "book" : null,
           bookTransactions: shouldOpenMapping ? [] : get().bookTransactions,
+          currentDraft:
+            shouldOpenMapping &&
+            get().currentDraft?.uploadSessionId === sessionId
+              ? get().currentDraft
+              : null,
         });
       }
 
@@ -962,33 +1260,11 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
       let payload: any;
 
       if (fileType === "pdf") {
-        const jobResponse = await apiClient.startExtractionJob(sessionId);
-
-        if (!jobResponse.success) {
-          throw new Error(jobResponse.error || "Extraction failed");
+        const response = await apiClient.extractDraft(sessionId);
+        if (!response.success) {
+          throw new Error(response.error || "Extraction draft failed");
         }
-
-        const queuedJob = mapProcessingJob(jobResponse.data);
-        if (!queuedJob) {
-          throw new Error("Failed to start extraction job");
-        }
-
-        set({
-          activeJob: queuedJob,
-          progress: queuedJob.progressPercent || 0,
-        });
-
-        const completedJob = await waitForProcessingJob(queuedJob.id, (job) => {
-          set({
-            activeJob: job,
-            progress: job.progressPercent || 0,
-          });
-        });
-
-        payload = completedJob.resultPayload;
-        if (!payload) {
-          throw new Error("Extraction job completed without preview data");
-        }
+        payload = response.data;
       } else {
         const response = await apiClient.extractData(sessionId);
         if (!response.success) {
@@ -997,25 +1273,37 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
         payload = response.data;
       }
 
-      const rawData = payload?.raw_data || [];
+      const draft = fileType === "pdf" ? mapExtractionDraft(payload) : null;
+      const rawData =
+        fileType === "pdf"
+          ? buildPdfPreviewRowsFromDraft(draft)
+          : payload?.raw_data || [];
       const columnHeaders =
-        payload?.column_headers?.length > 0
+        fileType === "pdf"
+          ? draft?.columnHeaders || []
+          : payload?.column_headers?.length > 0
           ? payload.column_headers
           : (rawData[0] || []).map((_: any, idx: number) => `Col_${idx + 1}`);
 
       const aiMapping: ColumnMapping = {
-        date: payload?.ai_guess_mapping?.date || columnHeaders[0] || "Date",
+        date:
+          draft?.mappedFields?.date ||
+          payload?.ai_guess_mapping?.date ||
+          columnHeaders[0] ||
+          "Date",
         narration:
+          draft?.mappedFields?.narration ||
           payload?.ai_guess_mapping?.narration ||
           columnHeaders[1] ||
           "Narration",
         reference:
+          draft?.mappedFields?.reference ||
           payload?.ai_guess_mapping?.reference ||
           columnHeaders[2] ||
           "Reference",
         amount: "__none__",
-        debit: payload?.ai_guess_mapping?.debit,
-        credit: payload?.ai_guess_mapping?.credit,
+        debit: draft?.mappedFields?.debit || payload?.ai_guess_mapping?.debit,
+        credit: draft?.mappedFields?.credit || payload?.ai_guess_mapping?.credit,
       };
 
       const previewRows = rawData.map((row: any[]) => {
@@ -1027,25 +1315,39 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
       });
 
       const columnMetrics = Object.fromEntries(
-        Object.entries(payload?.column_metrics || {}).map(([header, value]: [string, any]) => [
+        Object.entries(
+          fileType === "pdf"
+            ? buildColumnMetricsFromRows(rawData, columnHeaders)
+            : payload?.column_metrics || {}
+        ).map(([header, value]: [string, any]) => [
           header,
           {
-            nonEmptyCount: Number(value?.non_empty_count || 0),
-            parsedAmountCount: Number(value?.parsed_amount_count || 0),
-            parsedAmountTotal: toNumber(value?.parsed_amount_total),
+            nonEmptyCount: Number(
+              value?.non_empty_count ?? value?.nonEmptyCount ?? 0
+            ),
+            parsedAmountCount: Number(
+              value?.parsed_amount_count ?? value?.parsedAmountCount ?? 0
+            ),
+            parsedAmountTotal: toNumber(
+              value?.parsed_amount_total ?? value?.parsedAmountTotal
+            ),
           },
         ])
       );
 
-      set({ loading: false, activeJob: null, progress: 0 });
+      set({ loading: false, activeJob: null, progress: 0, currentDraft: draft });
       return {
         mapping: aiMapping,
         previewRows,
-        extractionMethod: payload?.extraction_method || "unknown",
-        extractionConfidence: payload?.ai_confidence ?? 0,
+        extractionMethod:
+          draft?.sourceMethod || payload?.extraction_method || "unknown",
+        extractionConfidence: draft?.confidence ?? payload?.ai_confidence ?? 0,
         columnHeaders,
-        totalRows: Number(payload?.total_rows || rawData.length || 0),
+        totalRows: Number(
+          (draft?.reviewedRows.length || 0) || payload?.total_rows || rawData.length || 0
+        ),
         columnMetrics,
+        draft,
       };
     } catch (error) {
       const errorMsg =
@@ -1063,6 +1365,28 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
     set({ loading: true, error: null });
 
     try {
+      const sessionResponse = await apiClient.getUploadSession(sessionId);
+      if (!sessionResponse.success || !sessionResponse.data?.file_type) {
+        throw new Error(sessionResponse.error || "Failed to load upload session");
+      }
+
+      const fileType = String(sessionResponse.data.file_type).toLowerCase();
+      if (fileType === "pdf") {
+        const activeDraft =
+          get().currentDraft?.uploadSessionId === sessionId
+            ? get().currentDraft
+            : null;
+        const draft = activeDraft || (await get().loadOrCreateDraft(sessionId));
+        const updatedDraft = await get().updateDraftMapping(draft.id, mapping);
+        set({
+          columnMapping: mapping,
+          currentDraft: updatedDraft,
+          loading: false,
+          step: "review",
+        });
+        return;
+      }
+
       const response = await apiClient.confirmMapping(
         sessionId,
         mapping,
@@ -1097,6 +1421,178 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
     } catch (error) {
       const errorMsg =
         error instanceof Error ? error.message : "Standardization failed";
+      set({ error: errorMsg, loading: false });
+      throw error;
+    }
+  },
+
+  loadOrCreateDraft: async (sessionId: string) => {
+    set({ loading: true, error: null });
+
+    try {
+      const response = await apiClient.extractDraft(sessionId);
+      if (!response.success) {
+        throw new Error(response.error || "Failed to load extraction draft");
+      }
+      const draft = mapExtractionDraft(response.data);
+      if (!draft) {
+        throw new Error("Draft response was empty");
+      }
+      set({ currentDraft: draft, loading: false });
+      return draft;
+    } catch (error) {
+      const errorMsg =
+        error instanceof Error ? error.message : "Failed to load extraction draft";
+      set({ error: errorMsg, loading: false });
+      throw error;
+    }
+  },
+
+  updateDraftMapping: async (draftId: string, mapping: ColumnMapping) => {
+    set({ loading: true, error: null });
+
+    try {
+      const response = await apiClient.updateDraftMapping(draftId, mapping);
+      if (!response.success) {
+        throw new Error(response.error || "Failed to update draft mapping");
+      }
+      const draft = mapExtractionDraft(response.data);
+      if (!draft) {
+        throw new Error("Updated draft response was empty");
+      }
+      set({ currentDraft: draft, columnMapping: mapping, loading: false });
+      return draft;
+    } catch (error) {
+      const errorMsg =
+        error instanceof Error ? error.message : "Failed to update draft mapping";
+      set({ error: errorMsg, loading: false });
+      throw error;
+    }
+  },
+
+  updateDraftRegion: async (draftId: string, payload) => {
+    set({ loading: true, error: null });
+
+    try {
+      const response = await apiClient.updateDraftRegion(draftId, {
+        header_row_index: payload.headerRowIndex ?? null,
+        table_start_row_index: payload.tableStartRowIndex ?? null,
+        table_end_row_index: payload.tableEndRowIndex ?? null,
+      });
+      if (!response.success) {
+        throw new Error(response.error || "Failed to update draft region");
+      }
+      const draft = mapExtractionDraft(response.data);
+      if (!draft) {
+        throw new Error("Updated draft response was empty");
+      }
+      set({ currentDraft: draft, loading: false });
+      return draft;
+    } catch (error) {
+      const errorMsg =
+        error instanceof Error ? error.message : "Failed to update draft region";
+      set({ error: errorMsg, loading: false });
+      throw error;
+    }
+  },
+
+  updateDraftRows: async (draftId: string, edits) => {
+    set({ loading: true, error: null });
+
+    try {
+      const response = await apiClient.updateDraftRows(
+        draftId,
+        edits.map((edit) => ({
+          row_index: edit.rowIndex,
+          cells: edit.cells,
+          row_type: edit.rowType,
+          is_repeated_header: edit.isRepeatedHeader,
+          is_within_selected_region: edit.isWithinSelectedRegion,
+        }))
+      );
+      if (!response.success) {
+        throw new Error(response.error || "Failed to update draft rows");
+      }
+      const draft = mapExtractionDraft(response.data);
+      if (!draft) {
+        throw new Error("Updated draft response was empty");
+      }
+      set({ currentDraft: draft, loading: false });
+      return draft;
+    } catch (error) {
+      const errorMsg =
+        error instanceof Error ? error.message : "Failed to update draft rows";
+      set({ error: errorMsg, loading: false });
+      throw error;
+    }
+  },
+
+  refreshDraftValidation: async (draftId: string) => {
+    const response = await apiClient.getDraftValidation(draftId);
+    if (!response.success) {
+      throw new Error(response.error || "Failed to refresh draft validation");
+    }
+    const validationSummary = mapDraftValidationSummary(response.data);
+    set((state) => ({
+      currentDraft: state.currentDraft
+        ? { ...state.currentDraft, validationSummary }
+        : state.currentDraft,
+    }));
+    return validationSummary;
+  },
+
+  finalizeDraft: async (draftId: string, source: "bank" | "book") => {
+    set({ loading: true, error: null });
+
+    try {
+      const response = await apiClient.finalizeDraft(draftId);
+      if (!response.success) {
+        throw new Error(response.error || "Failed to finalize draft");
+      }
+      const standardizedCount = Number(response.data?.standardized_count || 0);
+
+      const sessionId =
+        source === "bank" ? get().bankSessionId : get().bookSessionId;
+      if (!sessionId) {
+        throw new Error("Missing upload session after PDF finalization");
+      }
+
+      const txResponse =
+        source === "bank"
+          ? await apiClient.getBankTransactions(sessionId)
+          : await apiClient.getBookTransactions(sessionId);
+
+      let transactions: Transaction[] = [];
+      if (txResponse.success && Array.isArray(txResponse.data)) {
+        transactions = (txResponse.data || []).map((tx: any) =>
+          mapTransaction(tx, source)
+        );
+
+        if (source === "bank") {
+          set({ bankTransactions: transactions });
+        } else {
+          set({ bookTransactions: transactions });
+        }
+      }
+
+      if (standardizedCount === 0 || transactions.length === 0) {
+        set({
+          loading: false,
+          step: "review",
+          error:
+            "No transactions were standardized from this PDF draft. Check date/debit/credit mappings and confirm transaction rows are in region before finalizing again.",
+        });
+        return;
+      }
+
+      set({
+        currentDraft: null,
+        loading: false,
+        step: "upload",
+      });
+    } catch (error) {
+      const errorMsg =
+        error instanceof Error ? error.message : "Failed to finalize draft";
       set({ error: errorMsg, loading: false });
       throw error;
     }
@@ -1205,12 +1701,45 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
         (worksheetResponse.data?.progress_percent || 0) > 0 ||
         (worksheetResponse.data?.match_groups || []).length > 0;
 
+      let resumedDraft: ExtractionDraft | null = null;
+      let resumedDraftSource: "bank" | "book" | null = null;
+
+      const tryLoadDraftForSession = async (
+        uploadSessionId: string | null | undefined,
+        source: "bank" | "book"
+      ) => {
+        if (!uploadSessionId) return;
+        const response = await apiClient.getDraftBySession(uploadSessionId);
+        if (!response.success) {
+          if (response.status === 404) return;
+          throw new Error(response.error || "Failed to load extraction draft");
+        }
+        const draft = mapExtractionDraft(response.data);
+        if (!draft) return;
+
+        if (
+          !resumedDraft ||
+          new Date(draft.updatedAt).getTime() > new Date(resumedDraft.updatedAt).getTime()
+        ) {
+          resumedDraft = draft;
+          resumedDraftSource = source;
+        }
+      };
+
+      if (!hasStartedReconPasses) {
+        await tryLoadDraftForSession(worksheetSession?.bankUploadSessionId, "bank");
+        await tryLoadDraftForSession(worksheetSession?.bookUploadSessionId, "book");
+      }
+
       set({
-        step:
-          (worksheetSession?.bankUploadSessionId || worksheetSession?.bookUploadSessionId) &&
-          hasStartedReconPasses
-            ? "reconciliation"
-            : "prepare",
+        currentDraft: resumedDraft,
+        currentMappingSource: resumedDraftSource,
+        step: resumedDraft
+          ? "review"
+          : (worksheetSession?.bankUploadSessionId || worksheetSession?.bookUploadSessionId) &&
+            hasStartedReconPasses
+          ? "reconciliation"
+          : "prepare",
         loading: false,
       });
     } catch (error) {
@@ -1240,6 +1769,29 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
     if (!response.success) {
       const errorMsg = response.error || "Failed to prepare reconciliation worksheet";
       set({ error: errorMsg, loading: false });
+      throw new Error(errorMsg);
+    }
+
+    const preparedBankTransactions = Array.isArray(response.data?.bank_transactions)
+      ? (response.data?.bank_transactions || []).map((tx: any) =>
+          mapTransaction(tx, "bank")
+        )
+      : get().bankTransactions;
+    const preparedBookTransactions = Array.isArray(response.data?.book_transactions)
+      ? (response.data?.book_transactions || []).map((tx: any) =>
+          mapTransaction(tx, "book")
+        )
+      : get().bookTransactions;
+
+    if (
+      preparedBankTransactions.length === 0 &&
+      preparedBookTransactions.length === 0 &&
+      Number(response.data?.progress_percent || 0) === 0 &&
+      (response.data?.match_groups || []).length === 0
+    ) {
+      const errorMsg =
+        "No transactions are ready for reconciliation yet. Finalize both uploads first so the worksheet can be populated.";
+      set({ error: errorMsg, loading: false, step: "upload" });
       throw new Error(errorMsg);
     }
 
@@ -1343,18 +1895,11 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
       unmatchedSuggestions: mapUnmatchedSuggestions(
         response.data?.unmatched_suggestions || []
       ),
-      bankTransactions: Array.isArray(response.data?.bank_transactions)
-        ? (response.data?.bank_transactions || []).map((tx: any) =>
-            mapTransaction(tx, "bank")
-          )
-        : get().bankTransactions,
-      bookTransactions: Array.isArray(response.data?.book_transactions)
-        ? (response.data?.book_transactions || []).map((tx: any) =>
-            mapTransaction(tx, "book")
-          )
-        : get().bookTransactions,
+      bankTransactions: preparedBankTransactions,
+      bookTransactions: preparedBookTransactions,
       progress: response.data?.progress_percent || 0,
       reconciliationSession: preparedSession,
+      currentDraft: null,
       reconSetup: preparedSession
         ? buildReconSetupForSession(preparedSession, {
             bankOpenBalance:
@@ -1412,20 +1957,58 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
     set({ loading: true, error: null, activeJob: null, progress: 0 });
 
     try {
-      // Use the synchronous reconciliation route here so the UI moves directly
-      // from "Reconciling..." into highlighted in-quadrant matches without
-      // depending on a background worker poll loop.
-      const response = await apiClient.startReconciliation(
-        resolvedOrgId,
-        bankSessionId,
-        bookSessionId
-      );
+      const totalTransactionCount =
+        get().bankTransactions.length + get().bookTransactions.length;
+      const useAsyncReconciliation = totalTransactionCount >= 3000;
 
-      if (!response.success) {
-        throw new Error(response.error || "Reconciliation failed");
+      let reconciliationPayload: any = null;
+      if (useAsyncReconciliation) {
+        const queuedJobResponse = await apiClient.startReconciliationJob(
+          resolvedOrgId,
+          bankSessionId,
+          bookSessionId
+        );
+
+        if (!queuedJobResponse.success || !queuedJobResponse.data?.id) {
+          throw new Error(
+            queuedJobResponse.error || "Failed to queue reconciliation job"
+          );
+        }
+
+        const initialJob = mapProcessingJob(queuedJobResponse.data);
+        if (initialJob) {
+          set({ activeJob: initialJob, progress: initialJob.progressPercent || 0 });
+        }
+
+        const completedJob = await waitForProcessingJob(
+          String(queuedJobResponse.data.id),
+          (job) => {
+            set({
+              activeJob: job,
+              progress: typeof job.progressPercent === "number" ? job.progressPercent : 0,
+            });
+          }
+        );
+
+        reconciliationPayload = completedJob.resultPayload;
+        if (!reconciliationPayload) {
+          throw new Error("Reconciliation completed without a result payload");
+        }
+      } else {
+        // Keep the fast synchronous route for smaller datasets so the user
+        // lands directly in highlighted matches without extra polling delay.
+        const response = await apiClient.startReconciliation(
+          resolvedOrgId,
+          bankSessionId,
+          bookSessionId
+        );
+
+        if (!response.success) {
+          throw new Error(response.error || "Reconciliation failed");
+        }
+        reconciliationPayload = response.data;
       }
 
-      let reconciliationPayload = response.data;
       let groups: MatchGroup[] = (reconciliationPayload.match_groups || []).map(
         mapMatchGroup
       );
@@ -2137,6 +2720,7 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
       reconciliationSession: null,
       summary: null,
       activeJob: null,
+      currentDraft: null,
       loading: false,
       error: null,
       progress: 0,

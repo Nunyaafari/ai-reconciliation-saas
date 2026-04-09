@@ -12,6 +12,9 @@ const NewReconSetupStep = dynamic(
 );
 const UploadStep = dynamic(() => import("@/components/UploadStepConnected"));
 const MappingStep = dynamic(() => import("@/components/MappingStepConnected"));
+const ExtractionReviewStep = dynamic(
+  () => import("@/components/ExtractionReviewStepConnected")
+);
 const PrepareReconciliationStep = dynamic(
   () => import("@/components/PrepareReconciliationStepConnected")
 );
@@ -81,6 +84,7 @@ export default function Home() {
           {step === "setup" && <NewReconSetupStep />}
           {step === "upload" && <UploadStep />}
           {step === "mapping" && <MappingStep />}
+          {step === "review" && <ExtractionReviewStep />}
           {step === "prepare" && <PrepareReconciliationStep />}
           {step === "reconciliation" && <ReconciliationStep />}
           {(step === "workspace" || step === "history") && <WorkspaceStep />}

@@ -190,6 +190,22 @@ The current implementation is moving toward the right model:
 
 The product still needs tightening so every screen consistently follows the worksheet mental model.
 
+### PDF Draft Workflow Status (April 2026)
+
+Phase-1 persisted PDF review flow is now in place in code:
+
+- PDF uploads can create/resume a persisted extraction draft
+- Mapping, region, and row edits are patchable before standardization
+- Validation summary is generated from reviewed rows
+- Finalization writes standardized transactions from reviewed rows only
+- Tests added for draft validation behavior
+
+Remaining hardening for this area:
+
+- deeper workspace/history resume affordances for in-progress drafts
+- broader fixture coverage for real-world bank templates
+- template-learning feedback loop and confidence routing refinements
+
 ## Suggested Next Steps To Production Grade
 
 ### 1. Finish The In-Place Quadrant Workflow
