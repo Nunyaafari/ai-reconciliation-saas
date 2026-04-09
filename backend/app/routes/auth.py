@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -20,6 +20,7 @@ from app.schemas import (
     UserResponse,
 )
 from app.services.audit_service import audit_service
+from app.services.auth_rate_limit_service import auth_rate_limit_service
 from app.services.auth_service import auth_service
 from app.services.email_service import email_service
 
@@ -109,15 +110,46 @@ async def register(
 @router.post("/login", response_model=AuthSessionResponse)
 async def login(
     payload: LoginRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """Authenticate a user and return a bearer token."""
-    user = auth_service.authenticate_user(payload.email, payload.password, db)
+    email = payload.email.lower().strip()
+    client_ip = (request.client.host if request.client else "unknown").strip() or "unknown"
+    actor_key = f"{client_ip}:{email}"
+
+    allowed, retry_after = auth_rate_limit_service.check(
+        scope="login",
+        actor_key=actor_key,
+        max_attempts=settings.AUTH_LOGIN_MAX_ATTEMPTS,
+        window_seconds=settings.AUTH_LOGIN_WINDOW_SECONDS,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many login attempts. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    user = auth_service.authenticate_user(email, payload.password, db)
     if not user:
+        existing_user = db.query(User).filter(User.email == email).first()
+        if existing_user:
+            audit_service.log(
+                db=db,
+                org_id=existing_user.org_id,
+                actor_user_id=existing_user.id,
+                action="auth.login_failed",
+                entity_type="user",
+                entity_id=str(existing_user.id),
+                metadata={"email": email, "ip": client_ip},
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
+
+    auth_rate_limit_service.reset(scope="login", actor_key=actor_key)
 
     organization = db.query(Organization).filter(Organization.id == user.org_id).first()
     if not organization:
@@ -255,10 +287,26 @@ async def change_password(
 @router.post("/password-reset/request", response_model=PasswordResetResponse)
 async def request_password_reset(
     payload: PasswordResetRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ):
     """Issue a short-lived password reset token and email it when SMTP is configured."""
     email = payload.email.lower().strip()
+    client_ip = (request.client.host if request.client else "unknown").strip() or "unknown"
+    actor_key = f"{client_ip}:{email}"
+    allowed, retry_after = auth_rate_limit_service.check(
+        scope="password_reset_request",
+        actor_key=actor_key,
+        max_attempts=settings.AUTH_PASSWORD_RESET_MAX_ATTEMPTS,
+        window_seconds=settings.AUTH_PASSWORD_RESET_WINDOW_SECONDS,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many reset requests. Try again in {retry_after} seconds.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     user = db.query(User).filter(User.email == email).first()
     if not user or not user.is_active:
         return PasswordResetResponse(

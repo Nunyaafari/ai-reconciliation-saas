@@ -274,17 +274,17 @@ Current execution checklist (April 2026):
   - reject `DEBUG=true` in production
   - reject localhost `FRONTEND_APP_URL` / `CORS_ORIGINS` in production
   - reject `AUTH_BOOTSTRAP_ENABLED=true` in production
-- [ ] Add explicit staging and production deploy runbooks with cutover/rollback steps
+- [x] Add explicit staging and production deploy runbooks with cutover/rollback steps
 - [x] Add automated pre-deploy check:
   - `alembic upgrade head` must succeed
   - API `/health` and worker queue checks must pass
   - static asset build and startup smoke checks must pass
-- [ ] Add backup/restore scripts and schedule:
-  - postgres dump rotation policy
-  - uploaded file storage snapshot policy
-  - quarterly restore drill
+- [~] Add backup/restore scripts and schedule:
+  - [x] postgres dump script + restore script
+  - [x] uploaded file storage snapshot script + restore script
+  - [ ] quarterly restore drill execution and evidence capture
 - [ ] Add structured log shipping and central error tracking
-- [ ] Add container resource defaults for heavy reconciliations (CPU/memory limits and timeouts)
+- [x] Add container resource defaults for heavy reconciliations (CPU/memory limits and timeouts)
 
 ### 9. Security And Governance
 
@@ -301,18 +301,18 @@ Current execution checklist (April 2026):
 - [x] Role-based permission pass:
   - admin-only mutate operations
   - reviewer read-only enforcement on upload/mapping/reconcile/close/reset flows
-- [ ] Password reset hardening:
-  - token entropy and expiry checks
-  - invalidate previous tokens on issue
-  - rate-limit reset and login attempts
-- [ ] Session and auth hardening:
-  - audit failed auth attempts
-  - enforce secure defaults for JWT secret and expiration
-  - tighten CORS and frontend origin policy
+- [x] Password reset hardening:
+  - [x] token entropy and expiry checks
+  - [x] invalidate previous tokens on issue
+  - [x] rate-limit reset and login attempts
+- [~] Session and auth hardening:
+  - [x] audit failed auth attempts
+  - [x] enforce secure defaults for JWT secret and expiration
+  - [ ] tighten CORS and frontend origin policy
 - [ ] Report and audit governance:
   - verify only authorized users can access exports
   - ensure closed-month data remains immutable except explicit reopen path
-- [ ] Security release gate:
+- [x] Security release gate:
   - add a mandatory pre-production security checklist sign-off
 
 ## Practical Build Order

@@ -215,6 +215,21 @@ Optional skip for frontend smoke during backend-only maintenance:
 SKIP_FRONTEND_CHECK=true ./scripts/predeploy_check.sh
 ```
 
+Backup and restore helpers:
+
+```bash
+./scripts/backup_postgres.sh
+./scripts/backup_uploads.sh
+./scripts/restore_postgres.sh /absolute/path/to/postgres_dump.sql.gz
+./scripts/restore_uploads.sh /absolute/path/to/uploads_snapshot.tar.gz
+```
+
+Operational runbooks:
+
+- `docs/DEPLOY_RUNBOOK_STAGING_PRODUCTION.md`
+- `docs/BACKUP_RESTORE_RUNBOOK.md`
+- `docs/SECURITY_RELEASE_GATE.md`
+
 ### Option 3: Run manually
 
 Backend:

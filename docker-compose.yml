@@ -49,6 +49,10 @@ services:
       AUTH_BOOTSTRAP_ENABLED: ${AUTH_BOOTSTRAP_ENABLED:-false}
       JOB_MAX_RETRIES: ${JOB_MAX_RETRIES:-3}
       PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
+      AUTH_LOGIN_MAX_ATTEMPTS: ${AUTH_LOGIN_MAX_ATTEMPTS:-12}
+      AUTH_LOGIN_WINDOW_SECONDS: ${AUTH_LOGIN_WINDOW_SECONDS:-900}
+      AUTH_PASSWORD_RESET_MAX_ATTEMPTS: ${AUTH_PASSWORD_RESET_MAX_ATTEMPTS:-6}
+      AUTH_PASSWORD_RESET_WINDOW_SECONDS: ${AUTH_PASSWORD_RESET_WINDOW_SECONDS:-1800}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
@@ -70,6 +74,8 @@ services:
       - "8000:8000"
     volumes:
       - upload_storage:/app/storage/uploads
+    cpus: ${API_CPUS:-2}
+    mem_limit: ${API_MEM_LIMIT:-2g}
     command: ["sh", "/app/scripts/start.sh"]
 
   worker:
@@ -90,6 +96,10 @@ services:
       AUTH_BOOTSTRAP_ENABLED: ${AUTH_BOOTSTRAP_ENABLED:-false}
       JOB_MAX_RETRIES: ${JOB_MAX_RETRIES:-3}
       PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: ${PASSWORD_RESET_TOKEN_EXPIRE_MINUTES:-30}
+      AUTH_LOGIN_MAX_ATTEMPTS: ${AUTH_LOGIN_MAX_ATTEMPTS:-12}
+      AUTH_LOGIN_WINDOW_SECONDS: ${AUTH_LOGIN_WINDOW_SECONDS:-900}
+      AUTH_PASSWORD_RESET_MAX_ATTEMPTS: ${AUTH_PASSWORD_RESET_MAX_ATTEMPTS:-6}
+      AUTH_PASSWORD_RESET_WINDOW_SECONDS: ${AUTH_PASSWORD_RESET_WINDOW_SECONDS:-1800}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AZURE_AI_KEY: ${AZURE_AI_KEY:-}
       AZURE_AI_ENDPOINT: ${AZURE_AI_ENDPOINT:-}
@@ -105,10 +115,12 @@ services:
           "python -c \"from redis import Redis; import os; Redis.from_url(os.getenv('REDIS_URL','redis://redis:6379/0')).ping()\"",
         ]
       interval: 30s
-      timeout: 10s
+      timeout: 30s
       retries: 5
     volumes:
       - upload_storage:/app/storage/uploads
+    cpus: ${WORKER_CPUS:-2}
+    mem_limit: ${WORKER_MEM_LIMIT:-2g}
     command: ["sh", "/app/scripts/worker.sh"]
 
   frontend:
@@ -126,6 +138,8 @@ services:
         condition: service_healthy
     ports:
       - "3001:3000"
+    cpus: ${FRONTEND_CPUS:-1}
+    mem_limit: ${FRONTEND_MEM_LIMIT:-1g}
 
 volumes:
   postgres_data:

@@ -127,6 +127,18 @@ class AuthService:
         user: User,
         db: Session,
     ) -> tuple[PasswordResetToken, str]:
+        # Invalidate any previous active reset tokens so only the newest token works.
+        now = datetime.utcnow()
+        (
+            db.query(PasswordResetToken)
+            .filter(
+                PasswordResetToken.user_id == user.id,
+                PasswordResetToken.used_at.is_(None),
+                PasswordResetToken.expires_at > now,
+            )
+            .update({"used_at": now}, synchronize_session=False)
+        )
+
         raw_token = self.generate_password_reset_token()
         expires_at = datetime.now(timezone.utc) + timedelta(
             minutes=settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES
