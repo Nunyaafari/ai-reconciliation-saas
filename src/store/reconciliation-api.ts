@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { apiClient } from "@/lib/api";
+import type { ApiResponse } from "@/lib/api";
 
 // ===== TYPES =====
 
@@ -638,6 +639,16 @@ const mapExtractionDraft = (draft: any): ExtractionDraft | null => {
   };
 };
 
+const isDraftUnavailableResponse = (response: ApiResponse<any>): boolean => {
+  if (response.status === 404) return true;
+  if (response.status !== 400) return false;
+  const message = String(response.error || "").toLowerCase();
+  return (
+    message.includes("draft") &&
+    message.includes("pdf")
+  );
+};
+
 const mapAuthUser = (user: any): AuthUser | null => {
   if (!user) return null;
   return {
@@ -950,7 +961,7 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
             });
             return;
           }
-        } else if (draftResponse.status !== 404) {
+        } else if (!isDraftUnavailableResponse(draftResponse)) {
           throw new Error(draftResponse.error || "Failed to load extraction draft");
         }
       }
@@ -1233,10 +1244,7 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
           });
         }
       } else {
-        // Auto-transition to mapping after a short delay
-        setTimeout(() => {
-          set({ step: "mapping", loading: false });
-        }, 500);
+        set({ step: "mapping", loading: false });
       }
 
       return sessionId;
@@ -1400,6 +1408,7 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
       set({
         columnMapping: mapping,
         loading: false,
+        currentMappingSource: null,
       });
 
       // Fetch the standardized transactions for the appropriate source
@@ -1587,6 +1596,7 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
 
       set({
         currentDraft: null,
+        currentMappingSource: null,
         loading: false,
         step: "upload",
       });
@@ -1711,7 +1721,7 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
         if (!uploadSessionId) return;
         const response = await apiClient.getDraftBySession(uploadSessionId);
         if (!response.success) {
-          if (response.status === 404) return;
+          if (isDraftUnavailableResponse(response)) return;
           throw new Error(response.error || "Failed to load extraction draft");
         }
         const draft = mapExtractionDraft(response.data);
@@ -1763,7 +1773,8 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
     const response = await apiClient.prepareReconciliationContext(
       resolvedOrgId,
       bankSessionId,
-      bookSessionId
+      bookSessionId,
+      reconSetup?.accountNumber || undefined
     );
 
     if (!response.success) {

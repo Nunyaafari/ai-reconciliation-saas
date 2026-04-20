@@ -157,6 +157,7 @@ class ProcessingService:
             period_month=period_month,
             bank_upload_session_id=bank_session_id,
             book_upload_session_id=book_session_id,
+            account_number=None,
             bank_transactions=bank_upload_transactions,
             book_transactions=book_upload_transactions,
             db=db,
@@ -192,6 +193,8 @@ class ProcessingService:
         )
 
         for match in matches:
+            if int(match.get("confidence", 0)) < 100:
+                continue
             match_group = MatchGroup(
                 org_id=org_id,
                 match_type=match["type"],
@@ -357,6 +360,7 @@ class ProcessingService:
         bank_session_id: UUID | None,
         book_session_id: UUID | None,
         db: Session,
+        account_number: str | None = None,
         unmatched_suggestions: list[UnmatchedTransactionWithSuggestions] | None = None,
         reconciliation_session: ReconciliationSession | None = None,
     ) -> ReconciliationStatusResponse:
@@ -392,6 +396,7 @@ class ProcessingService:
                 period_month=period_month,
                 bank_upload_session_id=bank_session_id,
                 book_upload_session_id=book_session_id,
+                account_number=account_number,
                 bank_transactions=bank_transactions,
                 book_transactions=book_transactions,
                 db=db,

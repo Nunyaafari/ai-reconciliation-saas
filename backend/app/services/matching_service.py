@@ -40,6 +40,7 @@ class MatchingService:
     MAX_COMBO_DATASET = 250
     COMBO_DATE_WINDOW_DAYS = 7
     AMOUNT_TOLERANCE = 0.01
+    NARRATION_MATCH_THRESHOLD = 0.85
 
     def match_transactions(
         self,
@@ -166,33 +167,15 @@ class MatchingService:
         book_tx: BookTransaction,
     ) -> float:
         """
-        Calculate weighted confidence score: 0-100
+        Calculate rule-based confidence score aligned to the workbook passes:
 
-        Formula: S = (50% × value) + (20% × date) + (20% × ref) + (10% × narration)
+        100% -> amount + reference + date + narration
+         75% -> amount + reference + (date or narration)
+         50% -> amount + reference
+         25% -> any other combination of 2 or 3 matching columns
+          0% -> fewer than 2 columns match
         """
-        # Value signal (50%)
-        value_signal = self._calculate_value_signal(bank_tx, book_tx)
-
-        # Date signal (20%)
-        date_signal = self._calculate_date_signal(bank_tx.trans_date, book_tx.trans_date)
-
-        # Reference signal (20%)
-        ref_signal = self._calculate_reference_signal(bank_tx.reference, book_tx.reference)
-
-        # Narration signal (10%)
-        narration_signal = self._calculate_narration_signal(bank_tx.narration, book_tx.narration)
-
-        # Weighted sum
-        score = (
-            self.WEIGHTS["value"] * value_signal +
-            self.WEIGHTS["date"] * date_signal +
-            self.WEIGHTS["reference"] * ref_signal +
-            self.WEIGHTS["narration"] * narration_signal
-        )
-
-        # Use rounding instead of truncation so exact matches don't fall to 99
-        # from floating-point precision artifacts such as 0.999999999.
-        return max(0, min(100, int(round(score * 100))))
+        return self._calculate_rule_based_confidence(bank_tx, book_tx)
 
     def _normalized_direction(self, transaction: BankTransaction | BookTransaction) -> str | None:
         return getattr(transaction, "direction", None)
@@ -279,34 +262,70 @@ class MatchingService:
 
         return similarity
 
+    def _is_date_match(
+        self,
+        bank_date: datetime,
+        book_date: datetime,
+    ) -> bool:
+        if not bank_date or not book_date:
+            return False
+        return bank_date.date() == book_date.date()
+
+    def _is_reference_match(self, bank_ref: str, book_ref: str) -> bool:
+        if not bank_ref or not book_ref:
+            return False
+        return bank_ref.strip().upper() == book_ref.strip().upper()
+
+    def _is_narration_match(self, bank_narr: str, book_narr: str) -> bool:
+        if not bank_narr or not book_narr:
+            return False
+        similarity = _token_sort_ratio(bank_narr, book_narr) / 100.0
+        return similarity >= self.NARRATION_MATCH_THRESHOLD
+
+    def _matching_column_count(
+        self,
+        bank_tx: BankTransaction,
+        book_tx: BookTransaction,
+    ) -> int:
+        return sum(
+            [
+                1 if self._amounts_match(bank_tx, book_tx) else 0,
+                1 if self._is_reference_match(bank_tx.reference, book_tx.reference) else 0,
+                1 if self._is_date_match(bank_tx.trans_date, book_tx.trans_date) else 0,
+                1 if self._is_narration_match(bank_tx.narration, book_tx.narration) else 0,
+            ]
+        )
+
+    def _calculate_rule_based_confidence(
+        self,
+        bank_tx: BankTransaction,
+        book_tx: BookTransaction,
+    ) -> int:
+        amount_match = self._amounts_match(bank_tx, book_tx)
+        reference_match = self._is_reference_match(bank_tx.reference, book_tx.reference)
+        date_match = self._is_date_match(bank_tx.trans_date, book_tx.trans_date)
+        narration_match = self._is_narration_match(bank_tx.narration, book_tx.narration)
+
+        if amount_match and reference_match and date_match and narration_match:
+            return 100
+
+        if amount_match and reference_match and (date_match or narration_match):
+            return 75
+
+        if amount_match and reference_match:
+            return 50
+
+        if sum([amount_match, reference_match, date_match, narration_match]) >= 2:
+            return 25
+
+        return 0
+
     def _is_deterministic_match(
         self,
         bank_tx: BankTransaction,
         book_tx: BookTransaction,
     ) -> bool:
-        """
-        Deterministic match: Exact value AND (Exact ref OR very similar narration + close date)
-        """
-        # Value must match exactly
-        if not self._amounts_match(bank_tx, book_tx):
-            return False
-
-        # Date must be within 3 days
-        if abs((bank_tx.trans_date - book_tx.trans_date).days) > 3:
-            return False
-
-        # Either reference matches OR narration is very similar
-        if bank_tx.reference and book_tx.reference:
-            if bank_tx.reference.upper() == book_tx.reference.upper():
-                return True
-
-        # Check narration similarity
-        if bank_tx.narration and book_tx.narration:
-            similarity = _token_sort_ratio(bank_tx.narration, book_tx.narration) / 100.0
-            if similarity > 0.85:  # Very high threshold for deterministic
-                return True
-
-        return False
+        return self._calculate_rule_based_confidence(bank_tx, book_tx) == 100
 
     def get_suggestions_for_transaction(
         self,
@@ -325,14 +344,7 @@ class MatchingService:
                 continue
 
             signals = self._get_signal_breakdown(bank_tx, book_tx)
-            amount_matches = self._amounts_match(bank_tx, book_tx)
-
-            if self._is_deterministic_match(bank_tx, book_tx):
-                confidence = 100
-            elif amount_matches:
-                confidence = self.calculate_confidence_score(bank_tx, book_tx)
-            else:
-                confidence = self._calculate_non_amount_confidence(signals)
+            confidence = self._calculate_rule_based_confidence(bank_tx, book_tx)
 
             if confidence >= 25:
                 suggestions.append({
@@ -363,22 +375,15 @@ class MatchingService:
 
     def _calculate_non_amount_confidence(self, signals: Dict[str, float]) -> int:
         """Score suggestions when the amount does not match."""
-        non_amount_weight = (
-            self.WEIGHTS["date"]
-            + self.WEIGHTS["reference"]
-            + self.WEIGHTS["narration"]
+        matched_columns = sum(
+            [
+                1 if signals["value"] >= 1.0 else 0,
+                1 if signals["reference"] >= 1.0 else 0,
+                1 if signals["date"] >= 1.0 else 0,
+                1 if signals["narration"] >= self.NARRATION_MATCH_THRESHOLD else 0,
+            ]
         )
-        if non_amount_weight <= 0:
-            return 0
-
-        non_amount_score = (
-            self.WEIGHTS["date"] * signals["date"]
-            + self.WEIGHTS["reference"] * signals["reference"]
-            + self.WEIGHTS["narration"] * signals["narration"]
-        ) / non_amount_weight
-
-        capped_score = min(0.89, max(0.0, non_amount_score))
-        return int(round(capped_score * 100))
+        return 25 if matched_columns >= 2 else 0
 
     def _explain_match(self, signals: Dict[str, float], confidence: int) -> str:
         """Generate human-readable explanation for a match."""
@@ -386,17 +391,15 @@ class MatchingService:
 
         if signals["value"] == 1.0:
             reasons.append("Amount matches exactly")
-        elif confidence >= 25:
-            reasons.append("Amount differs")
-        if signals["date"] >= 0.8:
-            reasons.append("Date is very close")
+        if signals["date"] >= 1.0:
+            reasons.append("Date matches")
         if signals["reference"] == 1.0:
             reasons.append("Reference number matches")
-        if signals["narration"] >= 0.7:
+        if signals["narration"] >= self.NARRATION_MATCH_THRESHOLD:
             reasons.append("Description is similar")
 
         if not reasons:
-            reasons.append("Multiple signal match")
+            reasons.append("Two or more columns align")
 
         return " • ".join(reasons)
 

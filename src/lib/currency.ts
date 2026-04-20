@@ -32,9 +32,32 @@ export const normalizeCurrencyCode = (value?: string | null) => {
   }
 };
 
-export const formatCurrency = (value: number, currencyCode?: string | null) =>
-  new Intl.NumberFormat("en-US", {
+export const formatCurrency = (value: number, currencyCode?: string | null) => {
+  const normalizedCurrencyCode = normalizeCurrencyCode(currencyCode);
+  const amount = Number(value || 0);
+  const formatter = new Intl.NumberFormat("en-US", {
     style: "currency",
-    currency: normalizeCurrencyCode(currencyCode),
+    currency: normalizedCurrencyCode,
     minimumFractionDigits: 2,
-  }).format(Number(value || 0));
+    maximumFractionDigits: 2,
+  });
+  const formattedAbsolute = formatter.format(Math.abs(amount));
+
+  if (amount >= 0) return formattedAbsolute;
+
+  const prefixMatch = formattedAbsolute.match(/^([^\d]+(?:\s|\u00A0)*)/);
+  if (prefixMatch && prefixMatch[1].length > 0) {
+    const prefix = prefixMatch[1];
+    const numericPart = formattedAbsolute.slice(prefix.length);
+    return `${prefix}-${numericPart}`;
+  }
+
+  const suffixMatch = formattedAbsolute.match(/((?:\s|\u00A0)*[^\d]+)$/);
+  if (suffixMatch && suffixMatch[1].length > 0) {
+    const suffix = suffixMatch[1];
+    const numericPart = formattedAbsolute.slice(0, -suffix.length);
+    return `-${numericPart}${suffix}`;
+  }
+
+  return `-${formattedAbsolute}`;
+};

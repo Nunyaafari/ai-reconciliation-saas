@@ -8,6 +8,7 @@ import { formatCurrency, normalizeCurrencyCode } from "@/lib/currency";
 
 type ReportPreviewInput = {
   accountName: string;
+  accountNumber?: string | null;
   periodMonth: string;
   status?: string;
   companyName?: string | null;
@@ -195,6 +196,7 @@ const renderLane = ({
 
 export function openReconciliationReportPreview({
   accountName,
+  accountNumber,
   periodMonth,
   status,
   companyName,
@@ -444,7 +446,7 @@ export function openReconciliationReportPreview({
           .adjusted-card strong {
             display: block;
             margin-top: 12px;
-            font-size: 32px;
+            font-size: 30px;
             line-height: 1.1;
           }
           .adjusted-card small {
@@ -560,6 +562,11 @@ export function openReconciliationReportPreview({
               <div class="card">
                 <span>Account / Period</span>
                 <strong>${escapeHtml(accountName)}</strong>
+                ${
+                  accountNumber
+                    ? `<small>Account No. ${escapeHtml(accountNumber)}</small>`
+                    : ""
+                }
                 <small>${escapeHtml(periodMonth)}${status ? ` · ${escapeHtml(status)}` : ""}</small>
               </div>
               <div class="card">

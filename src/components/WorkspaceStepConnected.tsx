@@ -280,9 +280,11 @@ export default function WorkspaceStep() {
   };
 
   const handleOpenBlankPeriod = (account: WorkspaceAccountGroup) => {
-    const nextSetup = buildNextPeriodSetup(account);
     setBlankPeriodAccount(account);
-    setBlankPeriodMonth(nextSetup.periodMonth);
+    setBlankPeriodMonth(
+      account.sessions[0]?.periodMonth ||
+        `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`
+    );
     setShowBlankPeriodModal(true);
   };
 
@@ -354,6 +356,7 @@ export default function WorkspaceStep() {
 
       openReconciliationReportPreview({
         accountName: session.accountName,
+        accountNumber: session.accountNumber || null,
         periodMonth: summary.periodMonth || session.periodMonth,
         status: session.status,
         companyName: currentOrganization?.name || session.companyName,
@@ -448,8 +451,8 @@ export default function WorkspaceStep() {
                   />
                 </label>
                 <div className="rounded-2xl border border-slate-100 bg-slate-50 px-4 py-3 text-xs text-slate-500">
-                  If the selected month already exists, we will open that worksheet
-                  instead of creating a duplicate.
+                  If the selected month already exists, we will reset that month to a
+                  blank worksheet before opening it.
                 </div>
               </div>
 
@@ -496,12 +499,6 @@ export default function WorkspaceStep() {
             >
               <ArrowLeft className="h-4 w-4" />
               Back To Current Recon
-            </button>
-            <button
-              onClick={() => setStep("settings")}
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-            >
-              Settings
             </button>
           </div>
         </div>
@@ -562,8 +559,24 @@ export default function WorkspaceStep() {
           </div>
 
           {historyLoading ? (
-            <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-8 text-sm text-slate-500">
-              Loading account workspace...
+            <div className="mt-5 grid gap-5 lg:grid-cols-[0.92fr_1.08fr]">
+              <div className="space-y-3">
+                {[0, 1, 2].map((index) => (
+                  <div
+                    key={index}
+                    className="h-[96px] rounded-3xl border border-slate-200 bg-slate-50 px-4 py-4"
+                  >
+                    <div className="h-4 w-32 rounded-full bg-slate-200" />
+                    <div className="mt-3 h-3 w-24 rounded-full bg-slate-200" />
+                    <div className="mt-4 h-3 w-40 rounded-full bg-slate-200" />
+                  </div>
+                ))}
+              </div>
+              <div className="rounded-3xl border border-slate-200 bg-slate-50 p-5">
+                <div className="rounded-2xl border border-slate-200 bg-white px-4 py-6 text-sm text-slate-500">
+                  Loading account details...
+                </div>
+              </div>
             </div>
           ) : workspaceAccounts.length === 0 ? (
             <div className="mt-5 rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-center">
@@ -672,7 +685,7 @@ export default function WorkspaceStep() {
                             key={session.id}
                             className="rounded-2xl border border-slate-200 bg-white px-4 py-4"
                           >
-                            <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div className="flex items-start justify-between gap-3">
                               <div>
                                 <div className="flex flex-wrap items-center gap-2">
                                   <p className="text-base font-semibold text-slate-900">
@@ -692,50 +705,57 @@ export default function WorkspaceStep() {
                                   Last updated {formatTimestamp(session.updatedAt)}
                                 </p>
                               </div>
-
-                              <button
-                                type="button"
-                                onClick={() => handleOpenWorkspaceSession(session)}
-                                disabled={opening}
-                                className={`inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold ${
-                                  opening
-                                    ? "cursor-not-allowed bg-slate-200 text-slate-500"
+                              <div className="flex shrink-0 items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenWorkspaceSession(session)}
+                                  disabled={opening}
+                                  className={`inline-flex items-center gap-2 whitespace-nowrap rounded-xl px-3 py-2 text-sm font-semibold ${
+                                    opening
+                                      ? "cursor-not-allowed bg-slate-200 text-slate-500"
+                                      : canEdit
+                                      ? "bg-blue-600 text-white hover:bg-blue-700"
+                                      : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                                  }`}
+                                >
+                                  <FolderOpen className="h-4 w-4" />
+                                  {opening
+                                    ? "Opening..."
                                     : canEdit
-                                    ? "bg-blue-600 text-white hover:bg-blue-700"
-                                    : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                                }`}
-                              >
-                                <FolderOpen className="h-4 w-4" />
-                                {opening ? "Opening..." : canEdit ? "Edit" : "Open"}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleOpenReportPreview(session)}
-                                disabled={reportingSessionId === session.id}
-                                className={`inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold ${
-                                  reportingSessionId === session.id
-                                    ? "cursor-not-allowed bg-slate-200 text-slate-500"
-                                    : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                                }`}
-                              >
-                                <FileDown className="h-4 w-4" />
-                                {reportingSessionId === session.id
-                                  ? "Preparing..."
-                                  : "Report"}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleResetSession(session)}
-                                disabled={resettingSessionId === session.id}
-                                className={`inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold ${
-                                  resettingSessionId === session.id
-                                    ? "cursor-not-allowed bg-rose-200 text-rose-600"
-                                    : "border border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100"
-                                }`}
-                              >
-                                <RefreshCw className="h-4 w-4" />
-                                {resettingSessionId === session.id ? "Resetting..." : "Reset"}
-                              </button>
+                                    ? "Edit"
+                                    : "Open"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenReportPreview(session)}
+                                  disabled={reportingSessionId === session.id}
+                                  className={`inline-flex items-center gap-2 whitespace-nowrap rounded-xl px-3 py-2 text-sm font-semibold ${
+                                    reportingSessionId === session.id
+                                      ? "cursor-not-allowed bg-slate-200 text-slate-500"
+                                      : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                                  }`}
+                                >
+                                  <FileDown className="h-4 w-4" />
+                                  {reportingSessionId === session.id
+                                    ? "Preparing..."
+                                    : "Report"}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleResetSession(session)}
+                                  disabled={resettingSessionId === session.id}
+                                  className={`inline-flex items-center gap-2 whitespace-nowrap rounded-xl px-3 py-2 text-sm font-semibold ${
+                                    resettingSessionId === session.id
+                                      ? "cursor-not-allowed bg-rose-200 text-rose-600"
+                                      : "border border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100"
+                                  }`}
+                                >
+                                  <RefreshCw className="h-4 w-4" />
+                                  {resettingSessionId === session.id
+                                    ? "Resetting..."
+                                    : "Reset"}
+                                </button>
+                              </div>
                             </div>
                           </div>
                         );

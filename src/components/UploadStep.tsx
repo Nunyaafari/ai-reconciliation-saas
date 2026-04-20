@@ -1,20 +1,14 @@
 "use client";
 
-import { useState } from "react";
-import { Upload, File, AlertCircle } from "lucide-react";
+import { AlertCircle, File, Upload } from "lucide-react";
 import { useReconciliationStore } from "@/store/reconciliation";
 import { mockBankData, mockBookData } from "@/data/mockData";
 
 export default function UploadStep() {
-  const [dragActive, setDragActive] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
   const { setStep, setBankTransactions, setBookTransactions, setUploadedFileName } =
     useReconciliationStore();
 
   const handleSimulateUpload = (type: "bank" | "book") => {
-    setError(null);
-
     if (type === "bank") {
       setBankTransactions(mockBankData);
       setUploadedFileName("bank_statement_jan_2025.xlsx");
@@ -61,33 +55,27 @@ export default function UploadStep() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
           {/* Bank Statement Upload */}
           <div
-            onDragEnter={() => setDragActive(true)}
-            onDragLeave={() => setDragActive(false)}
-            onDrop={() => setDragActive(false)}
-            onClick={() => handleSimulateUpload("bank")}
-            className={`p-8 rounded-xl border-2 border-dashed transition-all cursor-pointer ${
-              dragActive
-                ? "border-blue-500 bg-blue-50"
-                : "border-slate-300 bg-slate-50 hover:border-blue-400 hover:bg-blue-50"
-            }`}
+            className="rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50 p-4 shadow-sm transition hover:-translate-y-0.5 hover:border-blue-400 hover:bg-blue-50"
           >
             <div className="text-center">
-              <div className="inline-flex h-12 w-12 items-center justify-center rounded-lg bg-blue-100 mb-4">
-                <File className="w-6 h-6 text-blue-600" />
+              <div className="mb-2 inline-flex h-9 w-9 items-center justify-center rounded-xl bg-blue-100">
+                <File className="h-5 w-5 text-blue-600" />
               </div>
-              <h3 className="font-semibold text-slate-900 mb-1">
+              <h3 className="mb-1 text-sm font-semibold text-slate-900">
                 Bank Statement
               </h3>
-              <p className="text-sm text-slate-600 mb-4">
+              <p className="mb-3 text-[11px] text-slate-600">
                 PDF, XLSX, or CSV format
               </p>
-              <div className="flex items-center justify-center gap-2 mb-2">
-                <Upload className="w-4 h-4 text-blue-600" />
-                <span className="text-sm font-medium text-blue-600">
-                  Click to upload or drag
-                </span>
-              </div>
-              <p className="text-xs text-slate-500">
+              <button
+                type="button"
+                onClick={() => handleSimulateUpload("bank")}
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                <Upload className="h-3.5 w-3.5 text-blue-600" />
+                Choose file
+              </button>
+              <p className="mt-2 text-[11px] text-slate-500">
                 Maximum file size: 10MB
               </p>
             </div>
@@ -95,24 +83,25 @@ export default function UploadStep() {
 
           {/* Cash Book Upload */}
           <div
-            onClick={() => handleSimulateUpload("book")}
-            className="p-8 rounded-xl border-2 border-dashed transition-all cursor-pointer border-slate-300 bg-slate-50 hover:border-green-400 hover:bg-green-50"
+            className="rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50 p-4 shadow-sm transition hover:-translate-y-0.5 hover:border-green-400 hover:bg-green-50"
           >
             <div className="text-center">
-              <div className="inline-flex h-12 w-12 items-center justify-center rounded-lg bg-green-100 mb-4">
-                <File className="w-6 h-6 text-green-600" />
+              <div className="mb-2 inline-flex h-9 w-9 items-center justify-center rounded-xl bg-green-100">
+                <File className="h-5 w-5 text-green-600" />
               </div>
-              <h3 className="font-semibold text-slate-900 mb-1">Cash Book</h3>
-              <p className="text-sm text-slate-600 mb-4">
+              <h3 className="mb-1 text-sm font-semibold text-slate-900">Cash Book</h3>
+              <p className="mb-3 text-[11px] text-slate-600">
                 PDF, XLSX, or CSV format
               </p>
-              <div className="flex items-center justify-center gap-2 mb-2">
-                <Upload className="w-4 h-4 text-green-600" />
-                <span className="text-sm font-medium text-green-600">
-                  Click to upload or drag
-                </span>
-              </div>
-              <p className="text-xs text-slate-500">
+              <button
+                type="button"
+                onClick={() => handleSimulateUpload("book")}
+                className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                <Upload className="h-3.5 w-3.5 text-green-600" />
+                Choose file
+              </button>
+              <p className="mt-2 text-[11px] text-slate-500">
                 Maximum file size: 10MB
               </p>
             </div>

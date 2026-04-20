@@ -140,9 +140,15 @@ export default function AuthStep() {
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 via-white to-blue-50 p-6">
       <div className="grid w-full max-w-5xl gap-8 lg:grid-cols-[1.1fr_0.9fr]">
         <div className="rounded-3xl border border-slate-200 bg-white/90 p-8 shadow-sm">
-          <AppBrand subtitle="Workspace Sign-In" />
+          <div className="flex items-center justify-center">
+            <AppBrand
+              subtitle="Control, Confidence, Decisions."
+              logoClassName="h-20"
+              className="text-center"
+            />
+          </div>
           <h1 className="mt-6 text-4xl font-bold tracking-tight text-slate-900">
-            Secure, tenant-aware reconciliation
+            AI assisted reconciliation
           </h1>
           <p className="mt-4 text-base leading-7 text-slate-600">
             Sign in to your workspace or create a new organization admin account.
@@ -171,6 +177,9 @@ export default function AuthStep() {
         </div>
 
         <div className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm">
+          <p className="mb-4 text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
+            Workspace Sign-In
+          </p>
           <div className="mb-6 flex rounded-2xl bg-slate-100 p-1">
             <button
               type="button"

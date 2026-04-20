@@ -121,6 +121,26 @@ export default function MappingStep() {
   const hasCellValue = (value: any) =>
     value !== null && value !== undefined && String(value).trim() !== "";
 
+  const formatPreviewDateCell = (value: any) => {
+    if (value === null || value === undefined) return "—";
+    const raw = String(value).trim();
+    if (!raw) return "—";
+
+    const isoDateMatch = raw.match(/^(\d{4}-\d{2}-\d{2})T/);
+    if (isoDateMatch) return isoDateMatch[1];
+
+    const parsed = Date.parse(raw);
+    if (!Number.isNaN(parsed)) {
+      const date = new Date(parsed);
+      const year = date.getUTCFullYear();
+      const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+      const day = String(date.getUTCDate()).padStart(2, "0");
+      return `${year}-${month}-${day}`;
+    }
+
+    return raw;
+  };
+
   const formatMoney = (value: number) =>
     new Intl.NumberFormat("en-US", {
       minimumFractionDigits: 2,
@@ -958,7 +978,7 @@ export default function MappingStep() {
                                 : "bg-rose-50/60 text-rose-600"
                             }`}
                           >
-                            {row[userMapping.date] || "—"}
+                            {formatPreviewDateCell(row[userMapping.date])}
                           </td>
                           <td
                             className={`px-3 py-3 align-top ${

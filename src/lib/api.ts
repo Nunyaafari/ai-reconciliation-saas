@@ -481,10 +481,16 @@ class ApiClient {
   async prepareReconciliationContext(
     orgId: string,
     bankSessionId: string,
-    bookSessionId: string
+    bookSessionId: string,
+    accountNumber?: string
   ): Promise<ApiResponse<any>> {
+    const params = new URLSearchParams();
+    if (accountNumber?.trim()) {
+      params.set("account_number", accountNumber.trim());
+    }
+    const suffix = params.toString() ? `?${params.toString()}` : "";
     return this.request(
-      `/api/reconciliation/prepare/${orgId}/${bankSessionId}/${bookSessionId}`
+      `/api/reconciliation/prepare/${orgId}/${bankSessionId}/${bookSessionId}${suffix}`
     );
   }
 

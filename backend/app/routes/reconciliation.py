@@ -516,6 +516,7 @@ async def get_reconciliation_prepare_context(
     org_id: UUID,
     bank_session_id: UUID,
     book_session_id: UUID,
+    account_number: str | None = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -527,6 +528,7 @@ async def get_reconciliation_prepare_context(
         org_id=org_id,
         bank_session_id=bank_session_id,
         book_session_id=book_session_id,
+        account_number=account_number,
         db=db,
         unmatched_suggestions=[],
     )
@@ -1189,6 +1191,7 @@ async def download_reconciliation_report(
         period_month=period_month,
         bank_upload_session_id=bank_session_id,
         book_upload_session_id=book_session_id,
+        account_number=None,
         bank_transactions=bank_transactions,
         book_transactions=book_transactions,
         db=db,

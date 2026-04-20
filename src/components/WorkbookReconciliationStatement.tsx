@@ -103,6 +103,8 @@ type BucketInteractiveConfig = {
   matchStateByTransactionId?: Map<string, TransactionMatchState>;
   rowOrderByTransactionId?: Map<string, number>;
   onToggleGroup?: (groupId: string, checked: boolean) => void;
+  manualSelectedTransactionIds?: Set<string>;
+  onToggleManualSelection?: (transactionId: string, checked: boolean) => void;
   suggestionCountByTransactionId?: Map<string, number>;
   suggestionConfidenceByTransactionId?: Map<string, number>;
   reviewedSuggestionConfidenceByTransactionId?: Map<string, number>;
@@ -140,6 +142,9 @@ type LaneSelectionSummaryProps = {
   currencyCode?: string | null;
   onRemoveSelected?: () => void;
   canEdit?: boolean;
+  checkedItemLabel?: string;
+  checkedItemDescription?: string;
+  removeButtonLabel?: string;
 };
 
 type LaneInteractiveConfig = {
@@ -157,6 +162,7 @@ type WorkbookReconciliationStatementProps = {
   title: string;
   subtitle: string;
   accountName: string;
+  accountNumber?: string | null;
   periodMonth: string;
   bookOpenBalance: number;
   bookClosingBalance: number;
@@ -170,6 +176,8 @@ type WorkbookReconciliationStatementProps = {
   outstandingOnly?: boolean;
   topLaneInteractive?: LaneInteractiveConfig;
   bottomLaneInteractive?: LaneInteractiveConfig;
+  hideHeaderText?: boolean;
+  hideAccountNote?: boolean;
   balanceEditorConfig?: {
     canEdit: boolean;
     dirty: boolean;
@@ -342,12 +350,22 @@ function BucketTable({
                   interactiveConfig?.canCreateSuggestedMatch &&
                   interactiveConfig?.onCreateSuggestedMatch
               );
+              const canManualToggle = Boolean(
+                !matchState && interactiveConfig?.onToggleManualSelection
+              );
               const canReviewSuggestions = Boolean(
                 !matchState &&
                   suggestionCount > 0 &&
                   interactiveConfig?.onReviewSuggestions
               );
-              const isCheckboxChecked = Boolean(matchState?.selected || activeReview);
+              const isManuallySelected = Boolean(
+                interactiveConfig?.manualSelectedTransactionIds?.has(
+                  transaction.id
+                )
+              );
+              const isCheckboxChecked = Boolean(
+                matchState?.selected || activeReview || isManuallySelected
+              );
 
               const rowClasses = matchState
                 ? matchState.selected
@@ -361,6 +379,8 @@ function BucketTable({
                 ? reviewedSuggestionConfidence >= 90
                   ? "bg-amber-50 ring-1 ring-inset ring-amber-300"
                   : "bg-orange-50 ring-1 ring-inset ring-orange-200"
+                : isManuallySelected
+                ? "bg-violet-50 ring-1 ring-inset ring-violet-300"
                 : suggestionConfidence > 0
                 ? suggestionConfidence >= 90
                   ? "bg-amber-50 ring-1 ring-inset ring-amber-300"
@@ -396,6 +416,14 @@ function BucketTable({
                               return;
                             }
 
+                            if (canManualToggle) {
+                              interactiveConfig?.onToggleManualSelection?.(
+                                transaction.id,
+                                checked
+                              );
+                              return;
+                            }
+
                             if (canReviewSuggestions) {
                               interactiveConfig?.onReviewSuggestions?.(
                                 transaction.id
@@ -405,12 +433,14 @@ function BucketTable({
                           disabled={
                             !canToggleExistingMatch &&
                             !canCreateSuggestedMatch &&
+                            !canManualToggle &&
                             !canReviewSuggestions &&
                             !activeReview
                           }
                           className={`h-4 w-4 rounded border-slate-300 ${
                             canToggleExistingMatch ||
                             canCreateSuggestedMatch ||
+                            canManualToggle ||
                             canReviewSuggestions ||
                             activeReview
                               ? "cursor-pointer"
@@ -433,7 +463,7 @@ function BucketTable({
                       </span>
                       {transaction.isCarryforward ? (
                         <span className="mt-1 inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
-                          Carryforward
+                          (CF)
                         </span>
                       ) : null}
                       {matchState ? (
@@ -484,6 +514,11 @@ function BucketTable({
                               Stage match
                             </button>
                           ) : null}
+                        </span>
+                      ) : isManuallySelected ? (
+                        <span className="mt-1 inline-flex items-center gap-1 rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-semibold text-violet-700">
+                          <CheckSquare className="h-3 w-3" />
+                          Manual selection
                         </span>
                       ) : suggestionCount > 0 &&
                         interactiveConfig?.onReviewSuggestions ? (
@@ -603,37 +638,50 @@ function LaneSelectionSummary({
   currencyCode,
   onRemoveSelected,
   canEdit,
+  checkedItemLabel,
+  checkedItemDescription,
+  removeButtonLabel,
 }: LaneSelectionSummaryProps) {
   if (checkedGroupCount === 0) {
     return null;
   }
 
   const difference = leftSelectedTotal - rightSelectedTotal;
+  const resolvedItemLabel =
+    checkedItemLabel || (onRemoveSelected ? "match" : "row");
+  const resolvedDescription =
+    checkedItemDescription ||
+    (onRemoveSelected
+      ? "staged for removal from this lane."
+      : "selected in manual mode for discretionary balancing.");
 
   return (
     <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
-            Live Matched Totals
+            {onRemoveSelected ? "Live Matched Totals" : "Live Manual Totals"}
           </p>
           <p className="mt-1 text-xs text-slate-500">
-            {checkedGroupCount} checked match
-            {checkedGroupCount === 1 ? "" : "es"} staged for removal from this
-            lane.
+            {checkedGroupCount} checked{" "}
+            {resolvedItemLabel}
+            {checkedGroupCount === 1 ? "" : "es"}{" "}
+            {resolvedDescription}
           </p>
         </div>
-        <button
-          onClick={onRemoveSelected}
-          disabled={!canEdit || checkedGroupCount === 0}
-          className={`rounded-full px-4 py-2 text-xs font-semibold ${
-            !canEdit || checkedGroupCount === 0
-              ? "cursor-not-allowed bg-slate-200 text-slate-400"
-              : "bg-emerald-600 text-white hover:bg-emerald-700"
-          }`}
-        >
-          Remove checked matches
-        </button>
+        {onRemoveSelected ? (
+          <button
+            onClick={onRemoveSelected}
+            disabled={!canEdit || checkedGroupCount === 0}
+            className={`rounded-full px-4 py-2 text-xs font-semibold ${
+              !canEdit || checkedGroupCount === 0
+                ? "cursor-not-allowed bg-slate-200 text-slate-400"
+                : "bg-emerald-600 text-white hover:bg-emerald-700"
+            }`}
+          >
+            {removeButtonLabel || "Remove checked matches"}
+          </button>
+        ) : null}
       </div>
 
       <div className="mt-4 grid gap-3 md:grid-cols-3">
@@ -674,6 +722,7 @@ export default function WorkbookReconciliationStatement({
   title,
   subtitle,
   accountName,
+  accountNumber,
   periodMonth,
   bookOpenBalance,
   bookClosingBalance,
@@ -687,6 +736,8 @@ export default function WorkbookReconciliationStatement({
   outstandingOnly = false,
   topLaneInteractive,
   bottomLaneInteractive,
+  hideHeaderText = false,
+  hideAccountNote = false,
   balanceEditorConfig,
 }: WorkbookReconciliationStatementProps) {
   const bankCreditTotal = useMemo(
@@ -735,15 +786,19 @@ export default function WorkbookReconciliationStatement({
       <div className="border-b border-slate-200 bg-gradient-to-r from-slate-50 via-white to-cyan-50 px-6 py-6">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-              {title}
-            </p>
+            {!hideHeaderText ? (
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                {title}
+              </p>
+            ) : null}
             <h2 className="mt-2 text-2xl font-bold tracking-tight text-slate-900">
               BANK RECONCILIATION STATEMENT
             </h2>
-            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
-              {subtitle}
-            </p>
+            {!hideHeaderText ? (
+              <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
+                {subtitle}
+              </p>
+            ) : null}
           </div>
           <div className="rounded-3xl border border-slate-200 bg-white px-5 py-4 shadow-sm">
             <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
@@ -752,12 +807,19 @@ export default function WorkbookReconciliationStatement({
             <p className="mt-2 text-lg font-semibold text-slate-900">
               {accountName}
             </p>
+            {accountNumber ? (
+              <p className="mt-1 text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+                Account No. {accountNumber}
+              </p>
+            ) : null}
             <p className="mt-1 text-sm text-slate-500">{periodMonth}</p>
-            <p className="mt-3 text-xs text-slate-400">
-              {outstandingOnly
-                ? "Matched rows disappear here after they are removed, so the quadrants become the outstanding worksheet."
-                : "This is the raw classified worksheet before we remove matched rows."}
-            </p>
+            {!hideAccountNote ? (
+              <p className="mt-3 text-xs text-slate-400">
+                {outstandingOnly
+                  ? "Matched rows disappear here after they are removed, so the quadrants become the outstanding worksheet."
+                  : "This is the raw classified worksheet before we remove matched rows."}
+              </p>
+            ) : null}
           </div>
         </div>
 
@@ -1003,7 +1065,7 @@ export default function WorkbookReconciliationStatement({
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-300">
                 Adjusted Cash Book Balance
               </p>
-              <p className="text-2xl font-semibold">
+              <p className="text-[1.65rem] font-semibold">
                 {formatMoney(adjustedBookBalance, currencyCode)}
               </p>
             </div>
@@ -1031,7 +1093,7 @@ export default function WorkbookReconciliationStatement({
               <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-300">
                 Adjusted Bank Balance
               </p>
-              <p className="text-2xl font-semibold">
+              <p className="text-[1.65rem] font-semibold">
                 {formatMoney(adjustedBankBalance, currencyCode)}
               </p>
             </div>

@@ -66,14 +66,24 @@ export default function UploadStep() {
     book: boolean;
   }>({ bank: false, book: false });
 
+  const uploadedBankTransactions = useMemo(
+    () => bankTransactions.filter((transaction) => !transaction.isCarryforward),
+    [bankTransactions]
+  );
+  const uploadedBookTransactions = useMemo(
+    () => bookTransactions.filter((transaction) => !transaction.isCarryforward),
+    [bookTransactions]
+  );
+
   useEffect(() => {
     let cancelled = false;
 
     const fetchStatus = async (source: "bank" | "book", sessionId: string | null) => {
+      if (!cancelled) {
+        setSessionCompletion((prev) => ({ ...prev, [source]: false }));
+      }
+
       if (!sessionId) {
-        if (!cancelled) {
-          setSessionCompletion((prev) => ({ ...prev, [source]: false }));
-        }
         return;
       }
 
@@ -104,8 +114,8 @@ export default function UploadStep() {
     };
   }, [bankSessionId, bookSessionId]);
 
-  const bankMapped = bankTransactions.length > 0 || sessionCompletion.bank;
-  const bookMapped = bookTransactions.length > 0 || sessionCompletion.book;
+  const bankMapped = uploadedBankTransactions.length > 0 || sessionCompletion.bank;
+  const bookMapped = uploadedBookTransactions.length > 0 || sessionCompletion.book;
   const isAdmin = currentUser?.role === "admin";
   const currencyCode = normalizeCurrencyCode(reconSetup?.currencyCode || "GHS");
 
@@ -175,8 +185,23 @@ export default function UploadStep() {
   const canContinueReconciliation = Boolean(
     hasReconProgress || hasPreparedTransactions
   );
+  const isContinueReconReady = Boolean(
+    canContinueReconciliation &&
+      !loading &&
+      !bankNeedsReview &&
+      !bookNeedsReview &&
+      bankStatus !== "uploading" &&
+      bookStatus !== "uploading"
+  );
 
   const handleContinueReconciliation = async () => {
+    if (!isContinueReconReady) {
+      setError(
+        "Uploads are still processing. Wait until both file lanes finish mapping before continuing reconciliation."
+      );
+      return;
+    }
+
     try {
       setError(null);
 
@@ -269,7 +294,12 @@ export default function UploadStep() {
             {canContinueReconciliation ? (
               <button
                 onClick={handleContinueReconciliation}
-                className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 font-semibold text-emerald-700 hover:bg-emerald-100"
+                disabled={!isContinueReconReady}
+                className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 font-semibold ${
+                  isContinueReconReady
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                    : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+                }`}
               >
                 <CheckCircle2 className="h-3.5 w-3.5" />
                 Continue Recon
@@ -335,7 +365,12 @@ export default function UploadStep() {
                 {canContinueReconciliation ? (
                   <button
                     onClick={handleContinueReconciliation}
-                    className="rounded-xl bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700"
+                    disabled={!isContinueReconReady}
+                    className={`rounded-xl px-3 py-2 text-xs font-semibold ${
+                      isContinueReconReady
+                        ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                        : "cursor-not-allowed bg-slate-200 text-slate-500"
+                    }`}
                   >
                     Continue Recon
                   </button>
@@ -442,7 +477,7 @@ export default function UploadStep() {
               <TransactionPreviewPanel
                 title="Uploaded Bank Statement Preview"
                 subtitle="Review every bank-statement transaction that was classified from the uploaded file."
-                transactions={bankTransactions}
+                transactions={uploadedBankTransactions}
                 debitLabel="Bank Debits"
                 creditLabel="Bank Credits"
                 tone="blue"
@@ -454,7 +489,7 @@ export default function UploadStep() {
               <TransactionPreviewPanel
                 title="Uploaded Cash Book Preview"
                 subtitle="Review every cash-book transaction that was classified from the uploaded file."
-                transactions={bookTransactions}
+                transactions={uploadedBookTransactions}
                 debitLabel="Cash Book Debits"
                 creditLabel="Cash Book Credits"
                 tone="emerald"

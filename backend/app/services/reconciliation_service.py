@@ -83,31 +83,63 @@ class ReconciliationService:
         period_month: str,
         bank_upload_session_id: UUID,
         book_upload_session_id: UUID,
+        account_number: str | None,
         bank_transactions: Sequence[BankTransaction],
         book_transactions: Sequence[BookTransaction],
         db: Session,
     ) -> ReconciliationSession:
+        normalized_account_number = (account_number or "").strip() or None
         organization = db.query(Organization).filter(Organization.id == org_id).first()
+
+        # Prefer an exact session already bound to this upload pair.
         session = (
             db.query(ReconciliationSession)
             .filter(
                 ReconciliationSession.org_id == org_id,
-                ReconciliationSession.account_name == account_name,
-                ReconciliationSession.period_month == period_month,
+                ReconciliationSession.bank_upload_session_id == bank_upload_session_id,
+                ReconciliationSession.book_upload_session_id == book_upload_session_id,
             )
             .first()
         )
 
+        # Otherwise resolve by account-period (account number scoped when provided).
         if not session:
-            previous_session = (
+            lookup_query = db.query(ReconciliationSession).filter(
+                ReconciliationSession.org_id == org_id,
+                ReconciliationSession.account_name == account_name,
+                ReconciliationSession.period_month == period_month,
+            )
+            if normalized_account_number is not None:
+                lookup_query = lookup_query.filter(
+                    ReconciliationSession.account_number == normalized_account_number
+                )
+            session = lookup_query.first()
+
+        # Backward-compatible fallback for historical rows without account numbers.
+        if not session:
+            session = (
                 db.query(ReconciliationSession)
                 .filter(
                     ReconciliationSession.org_id == org_id,
                     ReconciliationSession.account_name == account_name,
-                    ReconciliationSession.period_month < period_month,
+                    ReconciliationSession.period_month == period_month,
                 )
-                .order_by(ReconciliationSession.period_month.desc())
                 .first()
+            )
+
+        if not session:
+            previous_query = db.query(ReconciliationSession).filter(
+                ReconciliationSession.org_id == org_id,
+                ReconciliationSession.account_name == account_name,
+                ReconciliationSession.period_month < period_month,
+            )
+            if normalized_account_number is not None:
+                previous_query = previous_query.filter(
+                    ReconciliationSession.account_number == normalized_account_number
+                )
+
+            previous_session = (
+                previous_query.order_by(ReconciliationSession.period_month.desc()).first()
             )
 
             bank_open_balance = (
@@ -124,6 +156,7 @@ class ReconciliationService:
             session = ReconciliationSession(
                 org_id=org_id,
                 account_name=account_name,
+                account_number=normalized_account_number,
                 period_month=period_month,
                 bank_open_balance=bank_open_balance,
                 bank_closing_balance=bank_open_balance,
@@ -169,6 +202,8 @@ class ReconciliationService:
         session.bank_upload_session_id = bank_upload_session_id
         session.book_upload_session_id = book_upload_session_id
         session.account_name = account_name
+        if normalized_account_number is not None:
+            session.account_number = normalized_account_number
         self._recalculate_closing_balances(session, bank_transactions, book_transactions)
         session.updated_at = datetime.utcnow()
 
@@ -494,15 +529,28 @@ class ReconciliationService:
         db: Session,
     ) -> ReconciliationSession:
         next_period_month = self.next_period_month(reconciliation_session.period_month)
-        next_session = (
-            db.query(ReconciliationSession)
-            .filter(
-                ReconciliationSession.org_id == reconciliation_session.org_id,
-                ReconciliationSession.account_name == reconciliation_session.account_name,
-                ReconciliationSession.period_month == next_period_month,
-            )
-            .first()
+        next_query = db.query(ReconciliationSession).filter(
+            ReconciliationSession.org_id == reconciliation_session.org_id,
+            ReconciliationSession.account_name == reconciliation_session.account_name,
+            ReconciliationSession.period_month == next_period_month,
         )
+        if reconciliation_session.account_number is not None:
+            next_query = next_query.filter(
+                ReconciliationSession.account_number == reconciliation_session.account_number
+            )
+        next_session = next_query.first()
+
+        # Backward-compatible fallback for historical rows without account numbers.
+        if not next_session:
+            next_session = (
+                db.query(ReconciliationSession)
+                .filter(
+                    ReconciliationSession.org_id == reconciliation_session.org_id,
+                    ReconciliationSession.account_name == reconciliation_session.account_name,
+                    ReconciliationSession.period_month == next_period_month,
+                )
+                .first()
+            )
 
         if not next_session:
             next_session = ReconciliationSession(
@@ -559,6 +607,10 @@ class ReconciliationService:
                 reconciliation_session.currency_code
             )
             next_session.updated_at = datetime.utcnow()
+
+        # Carryforward month should start without upload sessions attached.
+        next_session.bank_upload_session_id = None
+        next_session.book_upload_session_id = None
 
         self._replace_carryforward_transactions(
             next_session=next_session,

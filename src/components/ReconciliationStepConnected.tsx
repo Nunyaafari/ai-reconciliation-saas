@@ -5,7 +5,6 @@ import {
   AlertCircle,
   CheckCircle2,
   FileDown,
-  History,
   Info,
   Loader,
   PlusCircle,
@@ -652,8 +651,6 @@ export default function ReconciliationStep() {
 
   const [selectedBankTx, setSelectedBankTx] = useState<string | null>(null);
   const [initialized, setInitialized] = useState(false);
-  const [lastCompletedThreshold, setLastCompletedThreshold] = useState<number | null>(null);
-  const [runningPassThreshold, setRunningPassThreshold] = useState<number | null>(null);
   const [statusMessage, setStatusMessage] = useState<{
     tone: StatusTone;
     text: string;
@@ -689,10 +686,23 @@ export default function ReconciliationStep() {
     bankIds: string[];
     bookIds: string[];
   }>({ bankIds: [], bookIds: [] });
+  const [manualSelections, setManualSelections] = useState<{
+    topBankCreditIds: string[];
+    topBookDebitIds: string[];
+    bottomBookCreditIds: string[];
+    bottomBankDebitIds: string[];
+  }>({
+    topBankCreditIds: [],
+    topBookDebitIds: [],
+    bottomBookCreditIds: [],
+    bottomBankDebitIds: [],
+  });
   const [lastRemovedMatches, setLastRemovedMatches] = useState<UndoMatchSnapshot[] | null>(null);
   const [attemptedThresholds, setAttemptedThresholds] = useState<number[]>([]);
   const [isRunningReconcilePass, setIsRunningReconcilePass] = useState(false);
   const isAdmin = currentUser?.role === "admin";
+  const isSessionClosed = reconciliationSession?.status === "closed";
+  const canEditSession = Boolean(isAdmin && !isSessionClosed);
 
   const loadAuditEntries = useCallback(async () => {
     if (!currentUser) return;
@@ -797,30 +807,25 @@ export default function ReconciliationStep() {
   ]);
 
   useEffect(() => {
-    setAttemptedThresholds((current) => {
-      const next = new Set<number>(current);
-      for (const group of matchGroups) {
-        const bucket = confidenceBucketForGroup(group.confidence);
-        if (bucket !== null) {
-          next.add(bucket);
-        }
-      }
-      return Array.from(next).sort((left, right) => right - left);
-    });
-  }, [matchGroups]);
-
-  useEffect(() => {
     setAttemptedThresholds([]);
     setSelectedBankTx(null);
-    setLastCompletedThreshold(null);
-    setRunningPassThreshold(null);
+    setManualSelections({
+      topBankCreditIds: [],
+      topBookDebitIds: [],
+      bottomBookCreditIds: [],
+      bottomBankDebitIds: [],
+    });
   }, [reconciliationSession?.id]);
 
   useEffect(() => {
     setAttemptedThresholds([]);
     setSelectedBankTx(null);
-    setLastCompletedThreshold(null);
-    setRunningPassThreshold(null);
+    setManualSelections({
+      topBankCreditIds: [],
+      topBookDebitIds: [],
+      bottomBookCreditIds: [],
+      bottomBankDebitIds: [],
+    });
   }, [bankSessionId, bookSessionId]);
 
   const bankById = useMemo(
@@ -1108,15 +1113,129 @@ export default function ReconciliationStep() {
     [bankTransactions, bookTransactions]
   );
 
+  useEffect(() => {
+    const topBankIds = new Set(statementBuckets.bankCredits.map((tx) => tx.id));
+    const topBookIds = new Set(statementBuckets.bookDebits.map((tx) => tx.id));
+    const bottomBookIds = new Set(statementBuckets.bookCredits.map((tx) => tx.id));
+    const bottomBankIds = new Set(statementBuckets.bankDebits.map((tx) => tx.id));
+
+    setManualSelections((current) => {
+      const next = {
+        topBankCreditIds: current.topBankCreditIds.filter((id) => topBankIds.has(id)),
+        topBookDebitIds: current.topBookDebitIds.filter((id) => topBookIds.has(id)),
+        bottomBookCreditIds: current.bottomBookCreditIds.filter((id) => bottomBookIds.has(id)),
+        bottomBankDebitIds: current.bottomBankDebitIds.filter((id) => bottomBankIds.has(id)),
+      };
+
+      const unchanged =
+        next.topBankCreditIds.length === current.topBankCreditIds.length &&
+        next.topBookDebitIds.length === current.topBookDebitIds.length &&
+        next.bottomBookCreditIds.length === current.bottomBookCreditIds.length &&
+        next.bottomBankDebitIds.length === current.bottomBankDebitIds.length;
+
+      return unchanged ? current : next;
+    });
+  }, [statementBuckets]);
+
+  const reconcileCandidatesByThreshold = useMemo(() => {
+    const matchedBankIds = new Set(
+      matchGroups.flatMap((group) => group.bankTransactionIds)
+    );
+    const matchedBookIds = new Set(
+      matchGroups.flatMap((group) => group.bookTransactionIds)
+    );
+
+    return new Map(
+      RECONCILE_THRESHOLD_SEQUENCE.map((threshold) => {
+        const upperBound = getThresholdBandUpperBound(threshold);
+        const provisionalCandidates = unmatchedSuggestions
+          .map((entry) => {
+            if (matchedBankIds.has(entry.bankTransactionId)) {
+              return null;
+            }
+
+            const eligibleSuggestions = entry.suggestions.filter(
+              (suggestion) =>
+                suggestion.confidence >= threshold &&
+                suggestion.confidence < upperBound &&
+                !matchedBookIds.has(suggestion.bookTransactionId)
+            );
+
+            if (eligibleSuggestions.length !== 1) {
+              return null;
+            }
+
+            const candidate = eligibleSuggestions[0];
+            return {
+              bankTransactionId: entry.bankTransactionId,
+              bookTransactionId: candidate.bookTransactionId,
+              confidence: candidate.confidence,
+            };
+          })
+          .filter(Boolean) as {
+          bankTransactionId: string;
+          bookTransactionId: string;
+          confidence: number;
+        }[];
+
+        const bestByBook = new Map<
+          string,
+          (typeof provisionalCandidates)[number]
+        >();
+        for (const candidate of provisionalCandidates) {
+          const existing = bestByBook.get(candidate.bookTransactionId);
+          if (!existing || candidate.confidence > existing.confidence) {
+            bestByBook.set(candidate.bookTransactionId, candidate);
+          }
+        }
+
+        return [threshold, Array.from(bestByBook.values())] as const;
+      })
+    );
+  }, [matchGroups, unmatchedSuggestions]);
+
+  const completedThresholdsFromGroups = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          matchGroups
+            .map((group) => confidenceBucketForGroup(group.confidence))
+            .filter(
+              (
+                threshold
+              ): threshold is (typeof RECONCILE_THRESHOLD_SEQUENCE)[number] =>
+                threshold !== null
+            )
+        )
+      ),
+    [matchGroups]
+  );
+
+  const completedThresholds = useMemo(
+    () =>
+      Array.from(
+        new Set([...attemptedThresholds, ...completedThresholdsFromGroups])
+      ).sort((left, right) => right - left),
+    [attemptedThresholds, completedThresholdsFromGroups]
+  );
+
+  const nextReconcileThreshold = useMemo(
+    () =>
+      RECONCILE_THRESHOLD_SEQUENCE.find(
+        (threshold) => !completedThresholds.includes(threshold)
+      ) ?? null,
+    [completedThresholds]
+  );
+
   const activeSuggestionThreshold =
-    lastCompletedThreshold && lastCompletedThreshold < 100
-      ? lastCompletedThreshold
+    nextReconcileThreshold && nextReconcileThreshold < 100
+      ? nextReconcileThreshold
       : null;
   const activeSuggestionUpperBound = activeSuggestionThreshold
     ? getThresholdBandUpperBound(activeSuggestionThreshold)
     : null;
-  const showSuggestions =
-    !isRunningReconcilePass && activeSuggestionThreshold !== null;
+  // Batch mode: only show staged pass matches. Do not pre-highlight future-pass suggestions.
+  const showSuggestions = false;
 
   const suggestionCounts = useMemo(() => {
     if (!showSuggestions || !activeSuggestionThreshold || !activeSuggestionUpperBound) {
@@ -1241,71 +1360,110 @@ export default function ReconciliationStep() {
     unmatchedSuggestions,
   ]);
 
-  const nextReconcileThreshold = useMemo(
-    () =>
-      RECONCILE_THRESHOLD_SEQUENCE.find(
-        (threshold) => !attemptedThresholds.includes(threshold)
-      ) ?? null,
-    [attemptedThresholds]
-  );
-
   const nextReconcileCandidates = useMemo(() => {
     if (!nextReconcileThreshold) return [];
+    return reconcileCandidatesByThreshold.get(nextReconcileThreshold) || [];
+  }, [nextReconcileThreshold, reconcileCandidatesByThreshold]);
 
-    const upperBound = getThresholdBandUpperBound(nextReconcileThreshold);
-    const matchedBankIds = new Set(
-      matchGroups.flatMap((group) => group.bankTransactionIds)
-    );
-    const matchedBookIds = new Set(
-      matchGroups.flatMap((group) => group.bookTransactionIds)
-    );
+  const hasPendingMatchGroups = useMemo(
+    () => matchGroups.some((group) => group.status === "pending"),
+    [matchGroups]
+  );
 
-    const provisionalCandidates = unmatchedSuggestions
-      .map((entry) => {
-        if (matchedBankIds.has(entry.bankTransactionId)) {
-          return null;
-        }
+  // Manual mode should start only after pass work is exhausted and there are no pending staged matches left to review/remove.
+  const manualModeEnabled =
+    nextReconcileThreshold === null && canEditSession && !hasPendingMatchGroups;
 
-        const eligibleSuggestions = entry.suggestions.filter(
-          (suggestion) =>
-            suggestion.confidence >= nextReconcileThreshold &&
-            suggestion.confidence < upperBound &&
-            !matchedBookIds.has(suggestion.bookTransactionId)
-        );
-
-        if (eligibleSuggestions.length !== 1) {
-          return null;
-        }
-
-        const candidate = eligibleSuggestions[0];
+  const toggleManualSelection = useCallback(
+    (
+      key:
+        | "topBankCreditIds"
+        | "topBookDebitIds"
+        | "bottomBookCreditIds"
+        | "bottomBankDebitIds",
+      transactionId: string,
+      checked: boolean
+    ) => {
+      setManualSelections((current) => {
+        const existing = current[key];
+        const nextValues = checked
+          ? existing.includes(transactionId)
+            ? existing
+            : [...existing, transactionId]
+          : existing.filter((value) => value !== transactionId);
         return {
-          bankTransactionId: entry.bankTransactionId,
-          bookTransactionId: candidate.bookTransactionId,
-          confidence: candidate.confidence,
+          ...current,
+          [key]: nextValues,
         };
-      })
-      .filter(Boolean) as {
-      bankTransactionId: string;
-      bookTransactionId: string;
-      confidence: number;
-    }[];
+      });
+    },
+    []
+  );
 
-    const bestByBook = new Map<string, (typeof provisionalCandidates)[number]>();
-    for (const candidate of provisionalCandidates) {
-      const existing = bestByBook.get(candidate.bookTransactionId);
-      if (!existing || candidate.confidence > existing.confidence) {
-        bestByBook.set(candidate.bookTransactionId, candidate);
-      }
-    }
+  const manualSelectionSets = useMemo(
+    () => ({
+      topBankCreditIds: new Set(manualSelections.topBankCreditIds),
+      topBookDebitIds: new Set(manualSelections.topBookDebitIds),
+      bottomBookCreditIds: new Set(manualSelections.bottomBookCreditIds),
+      bottomBankDebitIds: new Set(manualSelections.bottomBankDebitIds),
+    }),
+    [manualSelections]
+  );
 
-    return Array.from(bestByBook.values());
-  }, [matchGroups, nextReconcileThreshold, unmatchedSuggestions]);
-
-  const nextPassLabel = isRunningReconcilePass
-    ? `Running ${runningPassThreshold ?? nextReconcileThreshold ?? 0}% pass`
-    : nextReconcileThreshold
-    ? `Next pass: ${nextReconcileThreshold}%`
-    : "No passes remaining";
+  const manualTopLeftSelectedTotal = useMemo(
+    () =>
+      statementBuckets.bankCredits.reduce(
+        (total, transaction) =>
+          total +
+          (manualSelectionSets.topBankCreditIds.has(transaction.id)
+            ? transactionCredit(transaction)
+            : 0),
+        0
+      ),
+    [manualSelectionSets.topBankCreditIds, statementBuckets.bankCredits]
+  );
+  const manualTopRightSelectedTotal = useMemo(
+    () =>
+      statementBuckets.bookDebits.reduce(
+        (total, transaction) =>
+          total +
+          (manualSelectionSets.topBookDebitIds.has(transaction.id)
+            ? transactionDebit(transaction)
+            : 0),
+        0
+      ),
+    [manualSelectionSets.topBookDebitIds, statementBuckets.bookDebits]
+  );
+  const manualBottomLeftSelectedTotal = useMemo(
+    () =>
+      statementBuckets.bookCredits.reduce(
+        (total, transaction) =>
+          total +
+          (manualSelectionSets.bottomBookCreditIds.has(transaction.id)
+            ? transactionCredit(transaction)
+            : 0),
+        0
+      ),
+    [manualSelectionSets.bottomBookCreditIds, statementBuckets.bookCredits]
+  );
+  const manualBottomRightSelectedTotal = useMemo(
+    () =>
+      statementBuckets.bankDebits.reduce(
+        (total, transaction) =>
+          total +
+          (manualSelectionSets.bottomBankDebitIds.has(transaction.id)
+            ? transactionDebit(transaction)
+            : 0),
+        0
+      ),
+    [manualSelectionSets.bottomBankDebitIds, statementBuckets.bankDebits]
+  );
+  const manualTopCheckedCount =
+    manualSelections.topBankCreditIds.length +
+    manualSelections.topBookDebitIds.length;
+  const manualBottomCheckedCount =
+    manualSelections.bottomBookCreditIds.length +
+    manualSelections.bottomBankDebitIds.length;
 
   const reviewingTopLane = selectedBankTransaction?.direction === "credit";
   const reviewingBottomLane = selectedBankTransaction?.direction === "debit";
@@ -1505,6 +1663,13 @@ export default function ReconciliationStep() {
   };
 
   const handleSaveOpeningBalances = async () => {
+    if (!canEditSession) {
+      setStatusMessage({
+        tone: "info",
+        text: "This month is closed. Balances are read-only.",
+      });
+      return;
+    }
     try {
       await updateOpeningBalances({
         bankOpenBalance: Number(openingBalanceDraft.bankOpenBalance || 0),
@@ -1623,6 +1788,8 @@ export default function ReconciliationStep() {
 
       openReconciliationReportPreview({
         accountName: nextSession?.accountName || "Account not set",
+        accountNumber:
+          nextSession?.accountNumber || reconSetup?.accountNumber || null,
         periodMonth:
           nextSummary.periodMonth ||
           nextSession?.periodMonth ||
@@ -1693,6 +1860,14 @@ export default function ReconciliationStep() {
   ];
 
   const handleSubmitManualEntry = async () => {
+    if (!canEditSession) {
+      setStatusMessage({
+        tone: "info",
+        text: "This month is closed. You cannot add records.",
+      });
+      return;
+    }
+
     const amountValue = Number(manualEntry.amount);
     if (!manualEntry.transDate) {
       setStatusMessage({ tone: "error", text: "Please provide a transaction date." });
@@ -1741,6 +1916,14 @@ export default function ReconciliationStep() {
   };
 
   const handleRunNextReconcilePass = async () => {
+    if (!canEditSession) {
+      setStatusMessage({
+        tone: "info",
+        text: "This month is closed. Reconciliation is view-only.",
+      });
+      return;
+    }
+
     const formatMatchSummary = (
       candidates: { confidence: number }[]
     ): string[] => {
@@ -1792,8 +1975,6 @@ export default function ReconciliationStep() {
       return;
     }
 
-    setLastCompletedThreshold(nextReconcileThreshold);
-    setRunningPassThreshold(nextReconcileThreshold);
     setIsRunningReconcilePass(true);
     setAttemptedThresholds((current) =>
       Array.from(new Set([...current, nextReconcileThreshold])).sort(
@@ -1804,7 +1985,6 @@ export default function ReconciliationStep() {
     if (nextReconcileCandidates.length === 0) {
       notifyNoMatchesFound("No matches found in this pass.");
       setIsRunningReconcilePass(false);
-      setRunningPassThreshold(null);
       return;
     }
 
@@ -1890,7 +2070,6 @@ export default function ReconciliationStep() {
       });
     } finally {
       setIsRunningReconcilePass(false);
-      setRunningPassThreshold(null);
     }
   };
 
@@ -1933,65 +2112,19 @@ export default function ReconciliationStep() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100">
-      <div className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 backdrop-blur">
+      <div className="sticky top-16 z-30 border-b border-slate-200 bg-white/90 shadow-sm backdrop-blur">
         <div className="mx-auto max-w-[1600px] px-6 py-4">
-          <div className="mb-3 flex flex-wrap items-center gap-2">
-            <span
-              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold ${
-                nextReconcileThreshold
-                  ? "border-blue-200 bg-blue-50 text-blue-700"
-                  : "border-slate-200 bg-slate-100 text-slate-500"
-              }`}
-            >
-              <span className="h-2 w-2 rounded-full bg-current" />
-              {nextPassLabel}
-            </span>
-            {nextReconcileThreshold ? (
-              <span className="text-[11px] text-slate-500">
-                Click Reconcile to stage matches in this pass.
-              </span>
-            ) : (
-              <span className="text-[11px] text-slate-500">
-                All confidence passes have been attempted.
-              </span>
-            )}
-          </div>
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <h1 className="text-3xl font-bold text-slate-900">Reconciliation Workspace</h1>
-              <p className="mt-1 text-sm text-slate-500">
-                Work directly inside the four quadrants, save progress any time, and keep reconciling until no more match passes remain.
-              </p>
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
+            <div className="min-w-0">
+              <h1 className="text-3xl font-bold text-slate-900">Recon Workspace</h1>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {reconciliationSession ? (
-                <span
-                  className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                    reconciliationSession.status === "closed"
-                      ? "bg-slate-200 text-slate-700"
-                      : "bg-blue-100 text-blue-700"
-                  }`}
-                >
-                  {reconciliationSession.accountName} · {reconciliationSession.periodMonth} · {reconciliationSession.status}
-                </span>
-              ) : null}
-              {currentUser ? (
-                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-700">
-                  {currentUser.role}
-                </span>
-              ) : null}
-              <button
-                onClick={() => setStep("workspace")}
-                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
-              >
-                <History className="h-4 w-4" />
-                Workspace
-              </button>
+            <div className="w-full overflow-x-auto xl:w-auto xl:justify-self-end">
+              <div className="flex min-w-max items-center gap-2 whitespace-nowrap">
               <button
                 onClick={() => setShowManualEntry(true)}
-                disabled={reconciliationSession?.status === "closed"}
+                disabled={!canEditSession}
                 className={`inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium ${
-                  reconciliationSession?.status === "closed"
+                  !canEditSession
                     ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
                     : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                 }`}
@@ -2001,9 +2134,9 @@ export default function ReconciliationStep() {
               </button>
               <button
                 onClick={handleSaveSession}
-                disabled={loading || !reconciliationSession || reconciliationSession.status === "closed"}
+                disabled={loading || !reconciliationSession || !canEditSession}
                 className={`inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium ${
-                  loading || !reconciliationSession || reconciliationSession.status === "closed"
+                  loading || !reconciliationSession || !canEditSession
                     ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
                     : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                 }`}
@@ -2012,27 +2145,15 @@ export default function ReconciliationStep() {
                 Save
               </button>
               <button
-                onClick={handleRunNextReconcilePass}
-                disabled={
-                  loading ||
-                  isRunningReconcilePass ||
-                  !isAdmin ||
-                  reconciliationSession?.status === "closed"
-                }
+                onClick={handleCompleteSession}
+                disabled={!canEditSession}
                 className={`rounded-lg px-4 py-2 text-sm font-semibold ${
-                  loading ||
-                  isRunningReconcilePass ||
-                  !isAdmin ||
-                  reconciliationSession?.status === "closed"
+                  !canEditSession
                     ? "cursor-not-allowed bg-slate-200 text-slate-500"
-                    : "bg-blue-600 text-white hover:bg-blue-700"
+                    : "bg-rose-600 text-white hover:bg-rose-700"
                 }`}
               >
-                {isRunningReconcilePass ? (
-                  <ReconcileProgressCue label="Reconciling..." />
-                ) : (
-                  "Reconcile"
-                )}
+                {reconciliationSession?.status === "closed" ? "Month Closed" : "Close Month"}
               </button>
               <button
                 onClick={handleDownloadReport}
@@ -2047,16 +2168,31 @@ export default function ReconciliationStep() {
                 {downloadingReport ? "Preparing..." : "Report"}
               </button>
               <button
-                onClick={handleCompleteSession}
-                disabled={!isAdmin || reconciliationSession?.status === "closed"}
+                onClick={handleRunNextReconcilePass}
+                disabled={
+                  loading ||
+                  isRunningReconcilePass ||
+                  !nextReconcileThreshold ||
+                  !canEditSession
+                }
                 className={`rounded-lg px-4 py-2 text-sm font-semibold ${
-                  !isAdmin || reconciliationSession?.status === "closed"
+                  loading ||
+                  isRunningReconcilePass ||
+                  !nextReconcileThreshold ||
+                  !canEditSession
                     ? "cursor-not-allowed bg-slate-200 text-slate-500"
-                    : "bg-emerald-600 text-white hover:bg-emerald-700"
+                    : "bg-blue-600 text-white hover:bg-blue-700"
                 }`}
               >
-                {reconciliationSession?.status === "closed" ? "Month Closed" : "Close Month"}
+                {isRunningReconcilePass ? (
+                  <ReconcileProgressCue label="Reconciling..." />
+                ) : (
+                  nextReconcileThreshold
+                    ? `Reconcile ${nextReconcileThreshold}%`
+                    : "Reconcile"
+                )}
               </button>
+              </div>
             </div>
           </div>
 
@@ -2255,6 +2391,9 @@ export default function ReconciliationStep() {
           title="Recon Workspace"
           subtitle="This is the live reconciliation worksheet. All review now happens inside these same quadrants: exact matches are checked in place, possible matches are reviewed side by side, and removed rows disappear here immediately so the quadrants become the outstanding view."
           accountName={reconciliationSession?.accountName || "Account not set"}
+          accountNumber={
+            reconciliationSession?.accountNumber || reconSetup?.accountNumber || null
+          }
           periodMonth={summary?.periodMonth || reconciliationSession?.periodMonth || "Period pending"}
           bookOpenBalance={summary?.bookOpenBalance || 0}
           bookClosingBalance={summary?.bookClosingBalance || 0}
@@ -2266,10 +2405,23 @@ export default function ReconciliationStep() {
           bookCredits={statementBuckets.bookCredits}
           bankDebits={statementBuckets.bankDebits}
           outstandingOnly
+          hideHeaderText
+          hideAccountNote
           topLaneInteractive={{
             leftBucketInteractive: {
               matchStateByTransactionId: topLaneInteractiveState.leftMatchState,
               rowOrderByTransactionId: topLaneInteractiveState.leftRowOrder,
+              manualSelectedTransactionIds: manualModeEnabled
+                ? manualSelectionSets.topBankCreditIds
+                : undefined,
+              onToggleManualSelection: manualModeEnabled
+                ? (transactionId, checked) =>
+                    toggleManualSelection(
+                      "topBankCreditIds",
+                      transactionId,
+                      checked
+                    )
+                : undefined,
               activeReviewTransactionId: reviewingTopLane ? selectedBankTx : null,
               onToggleGroup: (groupId, checked) =>
                 setLaneSelection(
@@ -2292,6 +2444,17 @@ export default function ReconciliationStep() {
             rightBucketInteractive: {
               matchStateByTransactionId: topLaneInteractiveState.rightMatchState,
               rowOrderByTransactionId: topLaneInteractiveState.rightRowOrder,
+              manualSelectedTransactionIds: manualModeEnabled
+                ? manualSelectionSets.topBookDebitIds
+                : undefined,
+              onToggleManualSelection: manualModeEnabled
+                ? (transactionId, checked) =>
+                    toggleManualSelection(
+                      "topBookDebitIds",
+                      transactionId,
+                      checked
+                    )
+                : undefined,
               suggestionConfidenceByTransactionId: showSuggestions
                 ? suggestionMaxConfidenceByBookId
                 : undefined,
@@ -2301,7 +2464,7 @@ export default function ReconciliationStep() {
               onCreateSuggestedMatch: reviewingTopLane
                 ? handleCreateSuggestedMatch
                 : undefined,
-              canCreateSuggestedMatch: Boolean(isAdmin && reviewingTopLane),
+              canCreateSuggestedMatch: Boolean(canEditSession && reviewingTopLane),
               onToggleGroup: (groupId, checked) =>
                 setLaneSelection(
                   "cashDebitBankCredit",
@@ -2312,17 +2475,35 @@ export default function ReconciliationStep() {
                   )
                 ),
             },
-            leftSelectedTotal: topLaneInteractiveState.leftSelectedTotal,
-            rightSelectedTotal: topLaneInteractiveState.rightSelectedTotal,
-            checkedGroupCount: topLaneInteractiveState.checkedGroupCount,
-            onRemoveSelected: () =>
-              handleRemoveSelectedMatches("cashDebitBankCredit"),
-            canEdit: Boolean(isAdmin),
+            leftSelectedTotal: manualModeEnabled
+              ? manualTopLeftSelectedTotal
+              : topLaneInteractiveState.leftSelectedTotal,
+            rightSelectedTotal: manualModeEnabled
+              ? manualTopRightSelectedTotal
+              : topLaneInteractiveState.rightSelectedTotal,
+            checkedGroupCount: manualModeEnabled
+              ? manualTopCheckedCount
+              : topLaneInteractiveState.checkedGroupCount,
+            onRemoveSelected: manualModeEnabled
+              ? undefined
+              : () => handleRemoveSelectedMatches("cashDebitBankCredit"),
+            canEdit: canEditSession,
           }}
           bottomLaneInteractive={{
             leftBucketInteractive: {
               matchStateByTransactionId: bottomLaneInteractiveState.leftMatchState,
               rowOrderByTransactionId: bottomLaneInteractiveState.leftRowOrder,
+              manualSelectedTransactionIds: manualModeEnabled
+                ? manualSelectionSets.bottomBookCreditIds
+                : undefined,
+              onToggleManualSelection: manualModeEnabled
+                ? (transactionId, checked) =>
+                    toggleManualSelection(
+                      "bottomBookCreditIds",
+                      transactionId,
+                      checked
+                    )
+                : undefined,
               suggestionConfidenceByTransactionId: showSuggestions
                 ? suggestionMaxConfidenceByBookId
                 : undefined,
@@ -2332,7 +2513,7 @@ export default function ReconciliationStep() {
               onCreateSuggestedMatch: reviewingBottomLane
                 ? handleCreateSuggestedMatch
                 : undefined,
-              canCreateSuggestedMatch: Boolean(isAdmin && reviewingBottomLane),
+              canCreateSuggestedMatch: Boolean(canEditSession && reviewingBottomLane),
               onToggleGroup: (groupId, checked) =>
                 setLaneSelection(
                   "cashCreditBankDebit",
@@ -2346,6 +2527,17 @@ export default function ReconciliationStep() {
             rightBucketInteractive: {
               matchStateByTransactionId: bottomLaneInteractiveState.rightMatchState,
               rowOrderByTransactionId: bottomLaneInteractiveState.rightRowOrder,
+              manualSelectedTransactionIds: manualModeEnabled
+                ? manualSelectionSets.bottomBankDebitIds
+                : undefined,
+              onToggleManualSelection: manualModeEnabled
+                ? (transactionId, checked) =>
+                    toggleManualSelection(
+                      "bottomBankDebitIds",
+                      transactionId,
+                      checked
+                    )
+                : undefined,
               activeReviewTransactionId: reviewingBottomLane ? selectedBankTx : null,
               onToggleGroup: (groupId, checked) =>
                 setLaneSelection(
@@ -2364,15 +2556,22 @@ export default function ReconciliationStep() {
                 );
               },
             },
-            leftSelectedTotal: bottomLaneInteractiveState.leftSelectedTotal,
-            rightSelectedTotal: bottomLaneInteractiveState.rightSelectedTotal,
-            checkedGroupCount: bottomLaneInteractiveState.checkedGroupCount,
-            onRemoveSelected: () =>
-              handleRemoveSelectedMatches("cashCreditBankDebit"),
-            canEdit: Boolean(isAdmin),
+            leftSelectedTotal: manualModeEnabled
+              ? manualBottomLeftSelectedTotal
+              : bottomLaneInteractiveState.leftSelectedTotal,
+            rightSelectedTotal: manualModeEnabled
+              ? manualBottomRightSelectedTotal
+              : bottomLaneInteractiveState.rightSelectedTotal,
+            checkedGroupCount: manualModeEnabled
+              ? manualBottomCheckedCount
+              : bottomLaneInteractiveState.checkedGroupCount,
+            onRemoveSelected: manualModeEnabled
+              ? undefined
+              : () => handleRemoveSelectedMatches("cashCreditBankDebit"),
+            canEdit: canEditSession,
           }}
           balanceEditorConfig={{
-            canEdit: Boolean(isAdmin),
+            canEdit: canEditSession,
             dirty: balanceDirty,
             values: openingBalanceDraft,
             onChange: (field, value) =>

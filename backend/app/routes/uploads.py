@@ -626,13 +626,17 @@ async def confirm_mapping(
             max_cols = max((len(r) for r in extraction_result["raw_data"]), default=0)
             column_headers = [f"Col_{i+1}" for i in range(max_cols)]
 
-        raw_rows = []
-        for row in extraction_result["raw_data"]:
-            row_dict = {}
-            for idx, value in enumerate(row):
-                key = column_headers[idx] if idx < len(column_headers) else f"Col_{idx+1}"
-                row_dict[key] = value
-            raw_rows.append(row_dict)
+        raw_rows = [
+            {
+                (
+                    column_headers[idx]
+                    if idx < len(column_headers)
+                    else f"Col_{idx + 1}"
+                ): value
+                for idx, value in enumerate(row)
+            }
+            for row in extraction_result["raw_data"]
+        ]
 
         # Standardize all rows
         standardized = standardization_service.standardize(
@@ -644,33 +648,25 @@ async def confirm_mapping(
         clear_existing_session_transactions(session, db)
 
         # Store standardized transactions in DB
-        transaction_count = 0
-        if session.upload_source == "bank":
-            for tx_data in standardized:
-                tx = BankTransaction(
-                    org_id=session.org_id,
-                    upload_session_id=session_id,
-                    trans_date=datetime.fromisoformat(tx_data["trans_date"]),
-                    narration=tx_data["narration"],
-                    reference=tx_data.get("reference"),
-                    amount=tx_data["amount"],
-                    status="unreconciled",
-                )
-                db.add(tx)
-                transaction_count += 1
-        else:  # book
-            for tx_data in standardized:
-                tx = BookTransaction(
-                    org_id=session.org_id,
-                    upload_session_id=session_id,
-                    trans_date=datetime.fromisoformat(tx_data["trans_date"]),
-                    narration=tx_data["narration"],
-                    reference=tx_data.get("reference"),
-                    amount=tx_data["amount"],
-                    status="unreconciled",
-                )
-                db.add(tx)
-                transaction_count += 1
+        payload = [
+            {
+                "org_id": session.org_id,
+                "upload_session_id": session_id,
+                "trans_date": datetime.fromisoformat(tx_data["trans_date"]),
+                "narration": tx_data["narration"],
+                "reference": tx_data.get("reference"),
+                "amount": tx_data["amount"],
+                "status": "unreconciled",
+            }
+            for tx_data in standardized
+        ]
+        transaction_count = len(payload)
+
+        if payload:
+            transaction_model = (
+                BankTransaction if session.upload_source == "bank" else BookTransaction
+            )
+            db.bulk_insert_mappings(transaction_model, payload)
 
         # Save fingerprint if requested (for future learning)
         if save_as_fingerprint:

@@ -48,7 +48,7 @@ export default function HistoryStep() {
     try {
       setWorkingSessionId(session.id);
       setError(null);
-      await openHistorySession(session, session.status === "closed" && isAdmin);
+      await openHistorySession(session, false);
     } catch (error) {
       console.error("Failed to reopen reconciliation session:", error);
     } finally {
@@ -105,7 +105,7 @@ export default function HistoryStep() {
               Monthly Reconciliation History
             </h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-              Reopen a prior month to continue approvals, or download the reconciliation report that was generated from that session.
+              Reopen a prior month to continue approvals, resume any pending PDF draft review, or download the reconciliation report that was generated from that session.
             </p>
           </div>
 
@@ -226,10 +226,8 @@ export default function HistoryStep() {
                         {isWorking
                           ? "Opening..."
                           : session.status === "closed"
-                          ? isAdmin
-                            ? "Reopen Month"
-                            : "Open Read-only"
-                          : "Open Workspace"}
+                          ? "Open Read-only"
+                          : "Open / Resume"}
                       </button>
                       <button
                         onClick={() => handleDownloadReport(session)}
