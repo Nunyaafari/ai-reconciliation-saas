@@ -1658,18 +1658,20 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
     });
 
     try {
+      let worksheetSessionId = session.id;
+
       if (reopenClosed && session.status === "closed") {
         const reopenResponse = await apiClient.reopenReconciliationSession(session.id);
         if (!reopenResponse.success) {
           throw new Error(reopenResponse.error || "Failed to reopen session");
         }
+        const reopenedSession = mapReconciliationSession(reopenResponse.data);
+        worksheetSessionId = reopenedSession?.id || session.id;
         set({
-          reconciliationSession: mapReconciliationSession(reopenResponse.data),
+          reconciliationSession: reopenedSession,
         });
       }
 
-      const worksheetSessionId =
-        useReconciliationStore.getState().reconciliationSession?.id || session.id;
       const worksheetResponse = await apiClient.getReconciliationWorksheet(
         worksheetSessionId
       );
@@ -2536,6 +2538,10 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
           state.reconciliationSession?.id === sessionId ? [] : state.matchGroups,
         unmatchedSuggestions:
           state.reconciliationSession?.id === sessionId ? [] : state.unmatchedSuggestions,
+        summary:
+          state.reconciliationSession?.id === sessionId ? null : state.summary,
+        progress:
+          state.reconciliationSession?.id === sessionId ? 0 : state.progress,
         loading: false,
       }));
 
