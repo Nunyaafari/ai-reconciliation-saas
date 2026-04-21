@@ -889,24 +889,6 @@ export default function ReconciliationStep() {
     [matchedSections]
   );
 
-  const effectiveSelectedMatchGroups = useMemo(
-    () => ({
-      cashCreditBankDebit: Array.from(
-        new Set([
-          ...selectedMatchGroups.cashCreditBankDebit,
-          ...exactPendingSelections.cashCreditBankDebit,
-        ])
-      ),
-      cashDebitBankCredit: Array.from(
-        new Set([
-          ...selectedMatchGroups.cashDebitBankCredit,
-          ...exactPendingSelections.cashDebitBankCredit,
-        ])
-      ),
-    }),
-    [exactPendingSelections, selectedMatchGroups]
-  );
-
   const buildLaneInteractiveState = useCallback(
     (
       lane: MatchLaneKey,
@@ -1007,11 +989,11 @@ export default function ReconciliationStep() {
       buildLaneInteractiveState(
         "cashDebitBankCredit",
         matchedSections.cashDebitBankCredit,
-        effectiveSelectedMatchGroups.cashDebitBankCredit
+        selectedMatchGroups.cashDebitBankCredit
       ),
     [
       buildLaneInteractiveState,
-      effectiveSelectedMatchGroups.cashDebitBankCredit,
+      selectedMatchGroups.cashDebitBankCredit,
       matchedSections.cashDebitBankCredit,
     ]
   );
@@ -1021,11 +1003,11 @@ export default function ReconciliationStep() {
       buildLaneInteractiveState(
         "cashCreditBankDebit",
         matchedSections.cashCreditBankDebit,
-        effectiveSelectedMatchGroups.cashCreditBankDebit
+        selectedMatchGroups.cashCreditBankDebit
       ),
     [
       buildLaneInteractiveState,
-      effectiveSelectedMatchGroups.cashCreditBankDebit,
+      selectedMatchGroups.cashCreditBankDebit,
       matchedSections.cashCreditBankDebit,
     ]
   );
@@ -1628,7 +1610,7 @@ export default function ReconciliationStep() {
   };
 
   const handleRemoveSelectedMatches = async (lane: MatchLaneKey) => {
-    const selectedIds = effectiveSelectedMatchGroups[lane];
+    const selectedIds = selectedMatchGroups[lane];
     if (!selectedIds.length) return;
 
     try {

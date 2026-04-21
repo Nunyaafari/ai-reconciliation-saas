@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CheckSquare, ChevronLeft, ChevronRight, Search, Sparkles } from "lucide-react";
 import { Transaction } from "@/store/reconciliation-api";
 import { formatCurrency, normalizeCurrencyCode } from "@/lib/currency";
@@ -240,6 +240,102 @@ function BucketTable({
       ),
     [currencyCode, direction, rows, searchQuery]
   );
+  const selectableMatchGroupIds = useMemo(() => {
+    if (!interactiveConfig?.onToggleGroup) return [];
+    const groupIds = new Set<string>();
+
+    for (const transaction of rows) {
+      const matchState =
+        interactiveConfig.matchStateByTransactionId?.get(transaction.id);
+      if (matchState) {
+        groupIds.add(matchState.groupId);
+      }
+    }
+
+    return Array.from(groupIds);
+  }, [
+    rows,
+    interactiveConfig?.matchStateByTransactionId,
+    interactiveConfig?.onToggleGroup,
+  ]);
+  const selectableManualTransactionIds = useMemo(() => {
+    if (!interactiveConfig?.onToggleManualSelection) return [];
+    const transactionIds: string[] = [];
+
+    for (const transaction of rows) {
+      const matchState =
+        interactiveConfig.matchStateByTransactionId?.get(transaction.id);
+      if (!matchState) {
+        transactionIds.push(transaction.id);
+      }
+    }
+
+    return transactionIds;
+  }, [
+    rows,
+    interactiveConfig?.matchStateByTransactionId,
+    interactiveConfig?.onToggleManualSelection,
+  ]);
+  const selectedMatchGroupIds = useMemo(() => {
+    const groupIds = new Set<string>();
+
+    for (const transaction of rows) {
+      const matchState =
+        interactiveConfig?.matchStateByTransactionId?.get(transaction.id);
+      if (matchState?.selected) {
+        groupIds.add(matchState.groupId);
+      }
+    }
+
+    return Array.from(groupIds);
+  }, [rows, interactiveConfig?.matchStateByTransactionId]);
+  const hasBulkSelectableRows =
+    selectableMatchGroupIds.length > 0 ||
+    selectableManualTransactionIds.length > 0;
+  const selectedManualTransactionIds = useMemo(() => {
+    if (!interactiveConfig?.manualSelectedTransactionIds) return [];
+
+    return selectableManualTransactionIds.filter((transactionId) =>
+      interactiveConfig.manualSelectedTransactionIds?.has(transactionId)
+    );
+  }, [
+    selectableManualTransactionIds,
+    interactiveConfig?.manualSelectedTransactionIds,
+  ]);
+  const hasCheckedRows =
+    selectedMatchGroupIds.length > 0 || selectedManualTransactionIds.length > 0;
+  const allRowsChecked =
+    hasBulkSelectableRows &&
+    selectedMatchGroupIds.length === selectableMatchGroupIds.length &&
+    selectedManualTransactionIds.length === selectableManualTransactionIds.length;
+  const headerCheckboxRef = useRef<HTMLInputElement | null>(null);
+
+  const handleBulkSelect = useCallback(
+    (checked: boolean) => {
+      if (interactiveConfig?.onToggleGroup) {
+        for (const groupId of selectableMatchGroupIds) {
+          interactiveConfig.onToggleGroup(groupId, checked);
+        }
+      }
+
+      if (interactiveConfig?.onToggleManualSelection) {
+        for (const transactionId of selectableManualTransactionIds) {
+          interactiveConfig.onToggleManualSelection(transactionId, checked);
+        }
+      }
+    },
+    [
+      interactiveConfig?.onToggleGroup,
+      interactiveConfig?.onToggleManualSelection,
+      selectableManualTransactionIds,
+      selectableMatchGroupIds,
+    ]
+  );
+
+  useEffect(() => {
+    if (!headerCheckboxRef.current) return;
+    headerCheckboxRef.current.indeterminate = hasCheckedRows && !allRowsChecked;
+  }, [allRowsChecked, hasCheckedRows]);
 
   const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
   const currentPage = Math.min(page, pageCount);
@@ -308,7 +404,25 @@ function BucketTable({
       </div>
 
       <div className="grid grid-cols-[28px_82px_84px_minmax(0,1fr)_104px] gap-2 border-b border-slate-200 bg-slate-50 px-3 py-3 text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500 sm:grid-cols-[32px_92px_100px_minmax(0,1fr)_112px] sm:gap-3 sm:px-4 lg:grid-cols-[34px_104px_112px_minmax(0,1fr)_120px]">
-        <span />
+        <span className="flex items-center justify-center">
+          {interactiveConfig ? (
+            <input
+              ref={headerCheckboxRef}
+              type="checkbox"
+              checked={allRowsChecked}
+              disabled={!hasBulkSelectableRows && !hasCheckedRows}
+              onChange={(event) => handleBulkSelect(event.target.checked)}
+              className={`h-4 w-4 rounded border-slate-300 ${
+                hasBulkSelectableRows || hasCheckedRows
+                  ? "cursor-pointer"
+                  : "cursor-not-allowed opacity-40"
+              }`}
+              title="Check or uncheck all rows in this quadrant"
+            />
+          ) : (
+            <span className="block h-4 w-4" />
+          )}
+        </span>
         <span className="truncate">Date</span>
         <span className="truncate">Reference</span>
         <span className="truncate">Narration</span>
