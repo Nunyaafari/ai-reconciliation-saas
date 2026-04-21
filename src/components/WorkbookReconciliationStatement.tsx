@@ -142,6 +142,7 @@ type LaneSelectionSummaryProps = {
   currencyCode?: string | null;
   onRemoveSelected?: () => void;
   canEdit?: boolean;
+  summaryTitle?: string;
   checkedItemLabel?: string;
   checkedItemDescription?: string;
   removeButtonLabel?: string;
@@ -156,6 +157,10 @@ type LaneInteractiveConfig = {
   currencyCode?: string | null;
   onRemoveSelected?: () => void;
   canEdit?: boolean;
+  summaryTitle?: string;
+  checkedItemLabel?: string;
+  checkedItemDescription?: string;
+  removeButtonLabel?: string;
 };
 
 type WorkbookReconciliationStatementProps = {
@@ -752,6 +757,7 @@ function LaneSelectionSummary({
   currencyCode,
   onRemoveSelected,
   canEdit,
+  summaryTitle,
   checkedItemLabel,
   checkedItemDescription,
   removeButtonLabel,
@@ -768,13 +774,15 @@ function LaneSelectionSummary({
     (onRemoveSelected
       ? "staged for removal from this lane."
       : "selected in manual mode for discretionary balancing.");
+  const resolvedSummaryTitle =
+    summaryTitle || (onRemoveSelected ? "Live Matched Totals" : "Live Manual Totals");
 
   return (
     <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
-            {onRemoveSelected ? "Live Matched Totals" : "Live Manual Totals"}
+            {resolvedSummaryTitle}
           </p>
           <p className="mt-1 text-xs text-slate-500">
             {checkedGroupCount} checked{" "}
@@ -1118,6 +1126,10 @@ export default function WorkbookReconciliationStatement({
             currencyCode={currencyCode}
             onRemoveSelected={topLaneInteractive.onRemoveSelected}
             canEdit={topLaneInteractive.canEdit}
+            summaryTitle={topLaneInteractive.summaryTitle}
+            checkedItemLabel={topLaneInteractive.checkedItemLabel}
+            checkedItemDescription={topLaneInteractive.checkedItemDescription}
+            removeButtonLabel={topLaneInteractive.removeButtonLabel}
           />
         ) : null}
 
@@ -1162,6 +1174,10 @@ export default function WorkbookReconciliationStatement({
             currencyCode={currencyCode}
             onRemoveSelected={bottomLaneInteractive.onRemoveSelected}
             canEdit={bottomLaneInteractive.canEdit}
+            summaryTitle={bottomLaneInteractive.summaryTitle}
+            checkedItemLabel={bottomLaneInteractive.checkedItemLabel}
+            checkedItemDescription={bottomLaneInteractive.checkedItemDescription}
+            removeButtonLabel={bottomLaneInteractive.removeButtonLabel}
           />
         ) : null}
 

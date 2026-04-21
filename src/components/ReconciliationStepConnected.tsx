@@ -1644,6 +1644,77 @@ export default function ReconciliationStep() {
     }
   };
 
+  const handleRemoveManualSelections = async (lane: MatchLaneKey) => {
+    if (!manualModeEnabled) return;
+
+    const selection =
+      lane === "cashDebitBankCredit"
+        ? {
+            bankIds: manualSelections.topBankCreditIds,
+            bookIds: manualSelections.topBookDebitIds,
+            difference: manualTopLeftSelectedTotal - manualTopRightSelectedTotal,
+          }
+        : {
+            bankIds: manualSelections.bottomBankDebitIds,
+            bookIds: manualSelections.bottomBookCreditIds,
+            difference: manualBottomLeftSelectedTotal - manualBottomRightSelectedTotal,
+          };
+
+    if (selection.bankIds.length === 0 && selection.bookIds.length === 0) {
+      return;
+    }
+
+    if (selection.bankIds.length === 0 || selection.bookIds.length === 0) {
+      setStatusMessage({
+        tone: "info",
+        text: "Select at least one row on both sides before removing.",
+      });
+      return;
+    }
+
+    if (Math.abs(selection.difference) > 0.009) {
+      setStatusMessage({
+        tone: "info",
+        text: `Selected subtotals are not balanced (${formatMoney(selection.difference)}). Use master uncheck, then re-check the correct rows.`,
+      });
+      return;
+    }
+
+    try {
+      await updateTransactionRemovalState({
+        bankTransactionIds: selection.bankIds,
+        bookTransactionIds: selection.bookIds,
+        removed: true,
+      });
+      await loadAuditEntries();
+      setManualSelections((current) =>
+        lane === "cashDebitBankCredit"
+          ? {
+              ...current,
+              topBankCreditIds: [],
+              topBookDebitIds: [],
+            }
+          : {
+              ...current,
+              bottomBookCreditIds: [],
+              bottomBankDebitIds: [],
+            }
+      );
+      setStatusMessage({
+        tone: "success",
+        text: `Removed ${selection.bankIds.length + selection.bookIds.length} manually selected row${
+          selection.bankIds.length + selection.bookIds.length === 1 ? "" : "s"
+        } from this lane.`,
+      });
+    } catch (error) {
+      console.error("Failed to remove manual selections:", error);
+      setStatusMessage({
+        tone: "error",
+        text: "Failed to remove manual selections.",
+      });
+    }
+  };
+
   const handleSaveOpeningBalances = async () => {
     if (!canEditSession) {
       setStatusMessage({
@@ -2467,9 +2538,15 @@ export default function ReconciliationStep() {
               ? manualTopCheckedCount
               : topLaneInteractiveState.checkedGroupCount,
             onRemoveSelected: manualModeEnabled
-              ? undefined
+              ? () => handleRemoveManualSelections("cashDebitBankCredit")
               : () => handleRemoveSelectedMatches("cashDebitBankCredit"),
             canEdit: canEditSession,
+            summaryTitle: manualModeEnabled ? "Live Manual Totals" : undefined,
+            checkedItemLabel: manualModeEnabled ? "row" : undefined,
+            checkedItemDescription: manualModeEnabled
+              ? "selected for manual removal from this lane."
+              : undefined,
+            removeButtonLabel: manualModeEnabled ? "Remove selected rows" : undefined,
           }}
           bottomLaneInteractive={{
             leftBucketInteractive: {
@@ -2548,9 +2625,15 @@ export default function ReconciliationStep() {
               ? manualBottomCheckedCount
               : bottomLaneInteractiveState.checkedGroupCount,
             onRemoveSelected: manualModeEnabled
-              ? undefined
+              ? () => handleRemoveManualSelections("cashCreditBankDebit")
               : () => handleRemoveSelectedMatches("cashCreditBankDebit"),
             canEdit: canEditSession,
+            summaryTitle: manualModeEnabled ? "Live Manual Totals" : undefined,
+            checkedItemLabel: manualModeEnabled ? "row" : undefined,
+            checkedItemDescription: manualModeEnabled
+              ? "selected for manual removal from this lane."
+              : undefined,
+            removeButtonLabel: manualModeEnabled ? "Remove selected rows" : undefined,
           }}
           balanceEditorConfig={{
             canEdit: canEditSession,
