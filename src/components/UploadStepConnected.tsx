@@ -227,10 +227,6 @@ export default function UploadStep() {
         return;
       }
 
-      if (bankSessionId && bookSessionId) {
-        await prepareReconciliationContext(orgId || undefined);
-      }
-
       if (
         hasStartedReconPasses &&
         (reconciliationSession?.id || latestState.reconciliationSession?.id)
@@ -238,6 +234,10 @@ export default function UploadStep() {
         await refreshReconciliation(orgId || undefined);
         setStep("reconciliation");
         return;
+      }
+
+      if (bankSessionId && bookSessionId) {
+        await prepareReconciliationContext(orgId || undefined);
       }
 
       setStep("prepare");

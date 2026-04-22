@@ -298,40 +298,82 @@ class ProcessingService:
         reconciliation_session: ReconciliationSession,
         db: Session,
     ) -> tuple[list[BankTransaction], list[BookTransaction]]:
-        bank_query = db.query(BankTransaction).filter(
-            BankTransaction.org_id == reconciliation_session.org_id
+        bank_transactions = (
+            db.query(BankTransaction)
+            .filter(
+                BankTransaction.org_id == reconciliation_session.org_id,
+                BankTransaction.reconciliation_session_id == reconciliation_session.id,
+            )
+            .order_by(
+                BankTransaction.trans_date.asc(),
+                BankTransaction.created_at.asc(),
+            )
+            .all()
         )
-        if reconciliation_session.bank_upload_session_id:
-            bank_query = bank_query.filter(
-                (BankTransaction.upload_session_id == reconciliation_session.bank_upload_session_id)
-                | (BankTransaction.reconciliation_session_id == reconciliation_session.id)
-            )
-        else:
-            bank_query = bank_query.filter(
-                BankTransaction.reconciliation_session_id == reconciliation_session.id
-            )
 
-        book_query = db.query(BookTransaction).filter(
-            BookTransaction.org_id == reconciliation_session.org_id
+        book_transactions = (
+            db.query(BookTransaction)
+            .filter(
+                BookTransaction.org_id == reconciliation_session.org_id,
+                BookTransaction.reconciliation_session_id == reconciliation_session.id,
+            )
+            .order_by(
+                BookTransaction.trans_date.asc(),
+                BookTransaction.created_at.asc(),
+            )
+            .all()
         )
-        if reconciliation_session.book_upload_session_id:
-            book_query = book_query.filter(
-                (BookTransaction.upload_session_id == reconciliation_session.book_upload_session_id)
-                | (BookTransaction.reconciliation_session_id == reconciliation_session.id)
-            )
-        else:
-            book_query = book_query.filter(
-                BookTransaction.reconciliation_session_id == reconciliation_session.id
-            )
 
-        bank_transactions = bank_query.order_by(
-            BankTransaction.trans_date.asc(),
-            BankTransaction.created_at.asc(),
-        ).all()
-        book_transactions = book_query.order_by(
-            BookTransaction.trans_date.asc(),
-            BookTransaction.created_at.asc(),
-        ).all()
+        # Backward-compatible fallback for historical rows that were only linked
+        # by upload_session_id before reconciliation_session_id hydration.
+        needs_commit = False
+
+        if (
+            not bank_transactions
+            and reconciliation_session.bank_upload_session_id is not None
+        ):
+            bank_transactions = (
+                db.query(BankTransaction)
+                .filter(
+                    BankTransaction.org_id == reconciliation_session.org_id,
+                    BankTransaction.upload_session_id
+                    == reconciliation_session.bank_upload_session_id,
+                )
+                .order_by(
+                    BankTransaction.trans_date.asc(),
+                    BankTransaction.created_at.asc(),
+                )
+                .all()
+            )
+            for transaction in bank_transactions:
+                if transaction.reconciliation_session_id != reconciliation_session.id:
+                    transaction.reconciliation_session_id = reconciliation_session.id
+                    needs_commit = True
+
+        if (
+            not book_transactions
+            and reconciliation_session.book_upload_session_id is not None
+        ):
+            book_transactions = (
+                db.query(BookTransaction)
+                .filter(
+                    BookTransaction.org_id == reconciliation_session.org_id,
+                    BookTransaction.upload_session_id
+                    == reconciliation_session.book_upload_session_id,
+                )
+                .order_by(
+                    BookTransaction.trans_date.asc(),
+                    BookTransaction.created_at.asc(),
+                )
+                .all()
+            )
+            for transaction in book_transactions:
+                if transaction.reconciliation_session_id != reconciliation_session.id:
+                    transaction.reconciliation_session_id = reconciliation_session.id
+                    needs_commit = True
+
+        if needs_commit:
+            db.commit()
         return bank_transactions, book_transactions
 
     def get_match_groups_for_transactions(
