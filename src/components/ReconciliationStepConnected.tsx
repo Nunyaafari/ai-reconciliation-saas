@@ -1446,6 +1446,11 @@ export default function ReconciliationStep() {
   const manualBottomCheckedCount =
     manualSelections.bottomBookCreditIds.length +
     manualSelections.bottomBankDebitIds.length;
+  const topLaneHasCheckedMatches = topLaneInteractiveState.checkedGroupCount > 0;
+  const bottomLaneHasCheckedMatches = bottomLaneInteractiveState.checkedGroupCount > 0;
+  const topLaneUseManualSummary = manualModeEnabled && !topLaneHasCheckedMatches;
+  const bottomLaneUseManualSummary =
+    manualModeEnabled && !bottomLaneHasCheckedMatches;
 
   const reviewingTopLane = selectedBankTransaction?.direction === "credit";
   const reviewingBottomLane = selectedBankTransaction?.direction === "debit";
@@ -2580,25 +2585,33 @@ export default function ReconciliationStep() {
                 ),
             },
             leftSelectedTotal: manualModeEnabled
-              ? manualTopLeftSelectedTotal
+              ? topLaneUseManualSummary
+                ? manualTopLeftSelectedTotal
+                : topLaneInteractiveState.leftSelectedTotal
               : topLaneInteractiveState.leftSelectedTotal,
             rightSelectedTotal: manualModeEnabled
-              ? manualTopRightSelectedTotal
+              ? topLaneUseManualSummary
+                ? manualTopRightSelectedTotal
+                : topLaneInteractiveState.rightSelectedTotal
               : topLaneInteractiveState.rightSelectedTotal,
             checkedGroupCount: manualModeEnabled
-              ? manualTopCheckedCount
+              ? topLaneUseManualSummary
+                ? manualTopCheckedCount
+                : topLaneInteractiveState.checkedGroupCount
               : topLaneInteractiveState.checkedGroupCount,
             onRemoveSelected: manualModeEnabled
-              ? () => handleRemoveManualSelections("cashDebitBankCredit")
+              ? topLaneUseManualSummary
+                ? () => handleRemoveManualSelections("cashDebitBankCredit")
+                : () => handleRemoveSelectedMatches("cashDebitBankCredit")
               : () => handleRemoveSelectedMatches("cashDebitBankCredit"),
             canEdit: canEditSession,
             removeInProgress: removingLane === "cashDebitBankCredit",
-            summaryTitle: manualModeEnabled ? "Live Manual Totals" : undefined,
-            checkedItemLabel: manualModeEnabled ? "row" : undefined,
-            checkedItemDescription: manualModeEnabled
+            summaryTitle: topLaneUseManualSummary ? "Live Manual Totals" : undefined,
+            checkedItemLabel: topLaneUseManualSummary ? "row" : undefined,
+            checkedItemDescription: topLaneUseManualSummary
               ? "selected for manual removal from this lane."
               : undefined,
-            removeButtonLabel: manualModeEnabled
+            removeButtonLabel: topLaneUseManualSummary
               ? "Remove selected rows"
               : "Remove checked matches",
           }}
@@ -2670,25 +2683,33 @@ export default function ReconciliationStep() {
               },
             },
             leftSelectedTotal: manualModeEnabled
-              ? manualBottomLeftSelectedTotal
+              ? bottomLaneUseManualSummary
+                ? manualBottomLeftSelectedTotal
+                : bottomLaneInteractiveState.leftSelectedTotal
               : bottomLaneInteractiveState.leftSelectedTotal,
             rightSelectedTotal: manualModeEnabled
-              ? manualBottomRightSelectedTotal
+              ? bottomLaneUseManualSummary
+                ? manualBottomRightSelectedTotal
+                : bottomLaneInteractiveState.rightSelectedTotal
               : bottomLaneInteractiveState.rightSelectedTotal,
             checkedGroupCount: manualModeEnabled
-              ? manualBottomCheckedCount
+              ? bottomLaneUseManualSummary
+                ? manualBottomCheckedCount
+                : bottomLaneInteractiveState.checkedGroupCount
               : bottomLaneInteractiveState.checkedGroupCount,
             onRemoveSelected: manualModeEnabled
-              ? () => handleRemoveManualSelections("cashCreditBankDebit")
+              ? bottomLaneUseManualSummary
+                ? () => handleRemoveManualSelections("cashCreditBankDebit")
+                : () => handleRemoveSelectedMatches("cashCreditBankDebit")
               : () => handleRemoveSelectedMatches("cashCreditBankDebit"),
             canEdit: canEditSession,
             removeInProgress: removingLane === "cashCreditBankDebit",
-            summaryTitle: manualModeEnabled ? "Live Manual Totals" : undefined,
-            checkedItemLabel: manualModeEnabled ? "row" : undefined,
-            checkedItemDescription: manualModeEnabled
+            summaryTitle: bottomLaneUseManualSummary ? "Live Manual Totals" : undefined,
+            checkedItemLabel: bottomLaneUseManualSummary ? "row" : undefined,
+            checkedItemDescription: bottomLaneUseManualSummary
               ? "selected for manual removal from this lane."
               : undefined,
-            removeButtonLabel: manualModeEnabled
+            removeButtonLabel: bottomLaneUseManualSummary
               ? "Remove selected rows"
               : "Remove checked matches",
           }}
