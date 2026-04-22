@@ -197,6 +197,8 @@ export default function WorkspaceStep() {
   const [resettingSessionId, setResettingSessionId] = useState<string | null>(
     null
   );
+  const [resetCandidateSession, setResetCandidateSession] =
+    useState<ReconciliationSession | null>(null);
   const [showBlankPeriodModal, setShowBlankPeriodModal] = useState(false);
   const [blankPeriodAccount, setBlankPeriodAccount] =
     useState<WorkspaceAccountGroup | null>(null);
@@ -392,16 +394,17 @@ export default function WorkspaceStep() {
   };
 
   const handleResetSession = async (session: ReconciliationSession) => {
-    const confirmed = window.confirm(
-      `Reset ${formatPeriodMonth(session.periodMonth)}? This will clear all transactions and balances for the month.`
-    );
-    if (!confirmed) return;
+    setResetCandidateSession(session);
+  };
 
+  const handleConfirmResetSession = async () => {
+    if (!resetCandidateSession) return;
     try {
       setError(null);
-      setResettingSessionId(session.id);
-      await resetReconciliationSession(session.id);
+      setResettingSessionId(resetCandidateSession.id);
+      await resetReconciliationSession(resetCandidateSession.id);
       await loadReconciliationHistory();
+      setResetCandidateSession(null);
     } catch (error) {
       setError(
         error instanceof Error
@@ -473,6 +476,44 @@ export default function WorkspaceStep() {
                   }`}
                 >
                   {creatingBlankPeriod ? "Opening..." : "Open Blank Period"}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {resetCandidateSession ? (
+          <div className="fixed inset-0 z-[85] flex items-center justify-center bg-slate-900/40 px-4">
+            <div className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 shadow-xl">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-rose-500">
+                Confirm Reset Month
+              </p>
+              <h2 className="mt-2 text-xl font-semibold text-slate-900">
+                Reset {formatPeriodMonth(resetCandidateSession.periodMonth)}?
+              </h2>
+              <p className="mt-2 text-sm text-slate-600">
+                This clears transactions, matches, and balances for the selected month.
+              </p>
+              <div className="mt-6 flex items-center justify-end gap-2">
+                <button
+                  onClick={() => setResetCandidateSession(null)}
+                  disabled={resettingSessionId === resetCandidateSession.id}
+                  className="rounded-full border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleConfirmResetSession}
+                  disabled={resettingSessionId === resetCandidateSession.id}
+                  className={`rounded-full px-4 py-2 text-xs font-semibold ${
+                    resettingSessionId === resetCandidateSession.id
+                      ? "cursor-not-allowed bg-rose-200 text-rose-600"
+                      : "bg-rose-600 text-white hover:bg-rose-700"
+                  }`}
+                >
+                  {resettingSessionId === resetCandidateSession.id
+                    ? "Resetting..."
+                    : "Yes, Reset Month"}
                 </button>
               </div>
             </div>

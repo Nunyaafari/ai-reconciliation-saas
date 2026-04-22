@@ -701,6 +701,9 @@ export default function ReconciliationStep() {
   const [attemptedThresholds, setAttemptedThresholds] = useState<number[]>([]);
   const [isRunningReconcilePass, setIsRunningReconcilePass] = useState(false);
   const [removingLane, setRemovingLane] = useState<MatchLaneKey | null>(null);
+  const [submittingManualEntry, setSubmittingManualEntry] = useState(false);
+  const [showCloseMonthConfirm, setShowCloseMonthConfirm] = useState(false);
+  const [closingMonth, setClosingMonth] = useState(false);
   const isAdmin = currentUser?.role === "admin";
   const isSessionClosed = reconciliationSession?.status === "closed";
   const canEditSession = Boolean(isAdmin && !isSessionClosed);
@@ -1348,14 +1351,10 @@ export default function ReconciliationStep() {
     return reconcileCandidatesByThreshold.get(nextReconcileThreshold) || [];
   }, [nextReconcileThreshold, reconcileCandidatesByThreshold]);
 
-  const hasPendingMatchGroups = useMemo(
-    () => matchGroups.some((group) => group.status === "pending"),
-    [matchGroups]
-  );
-
-  // Manual mode should start only after pass work is exhausted and there are no pending staged matches left to review/remove.
+  // Manual mode starts after all configured pass thresholds have been attempted.
+  // Users may keep staged matches and still continue with discretionary checks.
   const manualModeEnabled =
-    nextReconcileThreshold === null && canEditSession && !hasPendingMatchGroups;
+    nextReconcileThreshold === null && canEditSession;
 
   const toggleManualSelection = useCallback(
     (
@@ -1615,11 +1614,15 @@ export default function ReconciliationStep() {
     if (!selectedIds.length || removingLane === lane) return;
 
     setRemovingLane(lane);
+    setStatusMessage({
+      tone: "info",
+      text: "Removing selected matches...",
+    });
     try {
       const result = await approveMatchesBulk(selectedIds);
-      await loadAuditEntries();
       setLaneSelection(lane, []);
       setSelectedBankTx(null);
+      void loadAuditEntries();
 
       if (result.failed.length > 0 && result.approved.length === 0) {
         setStatusMessage({
@@ -1667,13 +1670,17 @@ export default function ReconciliationStep() {
     }
 
     setRemovingLane(lane);
+    setStatusMessage({
+      tone: "info",
+      text: "Removing selected manual rows...",
+    });
     try {
       await updateTransactionRemovalState({
         bankTransactionIds: selection.bankIds,
         bookTransactionIds: selection.bookIds,
         removed: true,
       });
-      await loadAuditEntries();
+      void loadAuditEntries();
       setManualSelections((current) =>
         lane === "cashDebitBankCredit"
           ? {
@@ -1740,12 +1747,16 @@ export default function ReconciliationStep() {
     }
 
     try {
+      setStatusMessage({
+        tone: "info",
+        text: "Removing selected outstanding items...",
+      });
       await updateTransactionRemovalState({
         bankTransactionIds: selectedOutstanding.bankIds,
         bookTransactionIds: selectedOutstanding.bookIds,
         removed: true,
       });
-      await loadAuditEntries();
+      void loadAuditEntries();
       setSelectedOutstanding({ bankIds: [], bookIds: [] });
       setStatusMessage({
         tone: "success",
@@ -1763,12 +1774,16 @@ export default function ReconciliationStep() {
     }
 
     try {
+      setStatusMessage({
+        tone: "info",
+        text: "Restoring selected removed items...",
+      });
       await updateTransactionRemovalState({
         bankTransactionIds: selectedRemoved.bankIds,
         bookTransactionIds: selectedRemoved.bookIds,
         removed: false,
       });
-      await loadAuditEntries();
+      void loadAuditEntries();
       setSelectedRemoved({ bankIds: [], bookIds: [] });
       setStatusMessage({
         tone: "success",
@@ -1781,24 +1796,25 @@ export default function ReconciliationStep() {
   };
 
   const handleCompleteSession = async () => {
-    const shouldClose = window.confirm(
-      "Are you sure you want to close this account period? This locks the month for editing and carries the remaining outstanding items into the next period."
-    );
+    setShowCloseMonthConfirm(true);
+  };
 
-    if (!shouldClose) {
-      return;
-    }
-
+  const handleConfirmCloseMonth = async () => {
+    if (closingMonth) return;
+    setClosingMonth(true);
     try {
       await closeReconciliationSession();
-      await loadAuditEntries();
+      void loadAuditEntries();
       setStatusMessage({
         tone: "success",
         text: "Month closed. We opened the next period with the carried outstanding rows and closing balances.",
       });
+      setShowCloseMonthConfirm(false);
     } catch (error) {
       console.error("Failed to close reconciliation session:", error);
       setStatusMessage({ tone: "error", text: "Failed to close the month." });
+    } finally {
+      setClosingMonth(false);
     }
   };
 
@@ -1902,6 +1918,7 @@ export default function ReconciliationStep() {
   ];
 
   const handleSubmitManualEntry = async () => {
+    if (submittingManualEntry) return;
     if (!canEditSession) {
       setStatusMessage({
         tone: "info",
@@ -1924,6 +1941,7 @@ export default function ReconciliationStep() {
       return;
     }
 
+    setSubmittingManualEntry(true);
     try {
       await createManualEntry({
         bucket: manualEntry.bucket as
@@ -1954,6 +1972,8 @@ export default function ReconciliationStep() {
         text:
           error instanceof Error ? error.message : "Failed to add manual entry.",
       });
+    } finally {
+      setSubmittingManualEntry(false);
     }
   };
 
@@ -2363,17 +2383,59 @@ export default function ReconciliationStep() {
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => setShowManualEntry(false)}
+                    disabled={submittingManualEntry}
                     className="rounded-full border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
                   >
                     Cancel
                   </button>
                   <button
                     onClick={handleSubmitManualEntry}
-                    className="rounded-full bg-slate-900 px-5 py-2 text-xs font-semibold text-white hover:bg-slate-800"
+                    disabled={submittingManualEntry}
+                    className={`rounded-full px-5 py-2 text-xs font-semibold ${
+                      submittingManualEntry
+                        ? "cursor-not-allowed bg-slate-300 text-slate-600"
+                        : "bg-slate-900 text-white hover:bg-slate-800"
+                    }`}
                   >
-                    Add Entry
+                    {submittingManualEntry ? "Adding..." : "Add Entry"}
                   </button>
                 </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {showCloseMonthConfirm ? (
+          <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-900/40 px-4">
+            <div className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 shadow-xl">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-rose-500">
+                Confirm Close Month
+              </p>
+              <h2 className="mt-2 text-xl font-semibold text-slate-900">
+                Close This Reconciliation Month?
+              </h2>
+              <p className="mt-2 text-sm text-slate-600">
+                This will lock the current month for editing and open the next month with carryforward outstanding items.
+              </p>
+              <div className="mt-6 flex items-center justify-end gap-2">
+                <button
+                  onClick={() => setShowCloseMonthConfirm(false)}
+                  disabled={closingMonth}
+                  className="rounded-full border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleConfirmCloseMonth}
+                  disabled={closingMonth}
+                  className={`rounded-full px-4 py-2 text-xs font-semibold ${
+                    closingMonth
+                      ? "cursor-not-allowed bg-rose-200 text-rose-600"
+                      : "bg-rose-600 text-white hover:bg-rose-700"
+                  }`}
+                >
+                  {closingMonth ? "Closing..." : "Yes, Close Month"}
+                </button>
               </div>
             </div>
           </div>
