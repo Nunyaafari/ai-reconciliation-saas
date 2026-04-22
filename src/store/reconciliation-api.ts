@@ -1829,21 +1829,51 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
     const requestedPreparedBy = reconSetup?.preparedBy ?? undefined;
     const requestedReviewedBy = reconSetup?.reviewedBy ?? undefined;
     const requestedCurrencyCode = reconSetup?.currencyCode ?? undefined;
+    const normalizeText = (value: string | null | undefined) =>
+      (value || "").trim();
+    const numbersDiffer = (
+      left: number | null | undefined,
+      right: number | null | undefined
+    ) => Math.abs((left ?? 0) - (right ?? 0)) > 0.000001;
+    const hasSessionFieldUpdates = preparedSession
+      ? (requestedBankOpenBalance !== undefined &&
+          numbersDiffer(requestedBankOpenBalance, preparedSession.bankOpenBalance)) ||
+        (requestedBookOpenBalance !== undefined &&
+          numbersDiffer(requestedBookOpenBalance, preparedSession.bookOpenBalance)) ||
+        (requestedBankClosingBalance !== undefined &&
+          numbersDiffer(
+            requestedBankClosingBalance,
+            preparedSession.bankClosingBalance
+          )) ||
+        (requestedBookClosingBalance !== undefined &&
+          numbersDiffer(
+            requestedBookClosingBalance,
+            preparedSession.bookClosingBalance
+          )) ||
+        (requestedAccountNumber !== undefined &&
+          normalizeText(requestedAccountNumber) !==
+            normalizeText(preparedSession.accountNumber)) ||
+        (requestedCompanyName !== undefined &&
+          normalizeText(requestedCompanyName) !==
+            normalizeText(preparedSession.companyName)) ||
+        (requestedCompanyAddress !== undefined &&
+          normalizeText(requestedCompanyAddress) !==
+            normalizeText(preparedSession.companyAddress)) ||
+        (requestedCompanyLogoDataUrl !== undefined &&
+          normalizeText(requestedCompanyLogoDataUrl) !==
+            normalizeText(preparedSession.companyLogoDataUrl)) ||
+        (requestedPreparedBy !== undefined &&
+          normalizeText(requestedPreparedBy) !==
+            normalizeText(preparedSession.preparedBy)) ||
+        (requestedReviewedBy !== undefined &&
+          normalizeText(requestedReviewedBy) !==
+            normalizeText(preparedSession.reviewedBy)) ||
+        (requestedCurrencyCode !== undefined &&
+          normalizeText(requestedCurrencyCode).toUpperCase() !==
+            normalizeText(preparedSession.currencyCode).toUpperCase())
+      : false;
 
-    if (
-      preparedSession &&
-      (requestedBankOpenBalance !== undefined ||
-        requestedBookOpenBalance !== undefined ||
-        requestedBankClosingBalance !== undefined ||
-        requestedBookClosingBalance !== undefined ||
-        requestedAccountNumber !== undefined ||
-        requestedCompanyName !== undefined ||
-        requestedCompanyAddress !== undefined ||
-        requestedCompanyLogoDataUrl !== undefined ||
-        requestedPreparedBy !== undefined ||
-        requestedReviewedBy !== undefined ||
-        requestedCurrencyCode !== undefined)
-    ) {
+    if (preparedSession && hasSessionFieldUpdates) {
       const balanceResponse = await apiClient.updateReconciliationSessionBalances(
         preparedSession.id,
         {
