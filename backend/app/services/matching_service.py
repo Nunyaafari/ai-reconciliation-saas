@@ -172,8 +172,8 @@ class MatchingService:
         100% -> amount + reference + date + narration
          75% -> amount + reference + (date or narration)
          50% -> amount + reference
-         25% -> any other combination of 2 or 3 matching columns
-          0% -> fewer than 2 columns match
+         25% -> amount + (date or narration)
+          0% -> fewer than 2 relevant columns match
         """
         return self._calculate_rule_based_confidence(bank_tx, book_tx)
 
@@ -315,7 +315,9 @@ class MatchingService:
         if amount_match and reference_match:
             return 50
 
-        if sum([amount_match, reference_match, date_match, narration_match]) >= 2:
+        # Keep the lowest pass anchored on amount to avoid low-confidence pairings
+        # that can create misleading subtotal differences.
+        if amount_match and (date_match or narration_match):
             return 25
 
         return 0

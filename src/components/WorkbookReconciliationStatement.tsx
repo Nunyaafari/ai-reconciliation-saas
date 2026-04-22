@@ -142,6 +142,7 @@ type LaneSelectionSummaryProps = {
   currencyCode?: string | null;
   onRemoveSelected?: () => void;
   canEdit?: boolean;
+  removeInProgress?: boolean;
   summaryTitle?: string;
   checkedItemLabel?: string;
   checkedItemDescription?: string;
@@ -157,6 +158,7 @@ type LaneInteractiveConfig = {
   currencyCode?: string | null;
   onRemoveSelected?: () => void;
   canEdit?: boolean;
+  removeInProgress?: boolean;
   summaryTitle?: string;
   checkedItemLabel?: string;
   checkedItemDescription?: string;
@@ -757,6 +759,7 @@ function LaneSelectionSummary({
   currencyCode,
   onRemoveSelected,
   canEdit,
+  removeInProgress,
   summaryTitle,
   checkedItemLabel,
   checkedItemDescription,
@@ -794,14 +797,14 @@ function LaneSelectionSummary({
         {onRemoveSelected ? (
           <button
             onClick={onRemoveSelected}
-            disabled={!canEdit || checkedGroupCount === 0}
+            disabled={!canEdit || checkedGroupCount === 0 || removeInProgress}
             className={`rounded-full px-4 py-2 text-xs font-semibold ${
-              !canEdit || checkedGroupCount === 0
+              !canEdit || checkedGroupCount === 0 || removeInProgress
                 ? "cursor-not-allowed bg-slate-200 text-slate-400"
                 : "bg-emerald-600 text-white hover:bg-emerald-700"
             }`}
           >
-            {removeButtonLabel || "Remove checked matches"}
+            {removeInProgress ? "Removing..." : removeButtonLabel || "Remove checked matches"}
           </button>
         ) : null}
       </div>
@@ -1126,6 +1129,7 @@ export default function WorkbookReconciliationStatement({
             currencyCode={currencyCode}
             onRemoveSelected={topLaneInteractive.onRemoveSelected}
             canEdit={topLaneInteractive.canEdit}
+            removeInProgress={topLaneInteractive.removeInProgress}
             summaryTitle={topLaneInteractive.summaryTitle}
             checkedItemLabel={topLaneInteractive.checkedItemLabel}
             checkedItemDescription={topLaneInteractive.checkedItemDescription}
@@ -1174,6 +1178,7 @@ export default function WorkbookReconciliationStatement({
             currencyCode={currencyCode}
             onRemoveSelected={bottomLaneInteractive.onRemoveSelected}
             canEdit={bottomLaneInteractive.canEdit}
+            removeInProgress={bottomLaneInteractive.removeInProgress}
             summaryTitle={bottomLaneInteractive.summaryTitle}
             checkedItemLabel={bottomLaneInteractive.checkedItemLabel}
             checkedItemDescription={bottomLaneInteractive.checkedItemDescription}

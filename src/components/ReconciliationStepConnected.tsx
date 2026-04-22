@@ -700,6 +700,7 @@ export default function ReconciliationStep() {
   const [lastRemovedMatches, setLastRemovedMatches] = useState<UndoMatchSnapshot[] | null>(null);
   const [attemptedThresholds, setAttemptedThresholds] = useState<number[]>([]);
   const [isRunningReconcilePass, setIsRunningReconcilePass] = useState(false);
+  const [removingLane, setRemovingLane] = useState<MatchLaneKey | null>(null);
   const isAdmin = currentUser?.role === "admin";
   const isSessionClosed = reconciliationSession?.status === "closed";
   const canEditSession = Boolean(isAdmin && !isSessionClosed);
@@ -1611,8 +1612,9 @@ export default function ReconciliationStep() {
 
   const handleRemoveSelectedMatches = async (lane: MatchLaneKey) => {
     const selectedIds = selectedMatchGroups[lane];
-    if (!selectedIds.length) return;
+    if (!selectedIds.length || removingLane === lane) return;
 
+    setRemovingLane(lane);
     try {
       const result = await approveMatchesBulk(selectedIds);
       await loadAuditEntries();
@@ -1641,45 +1643,30 @@ export default function ReconciliationStep() {
     } catch (error) {
       console.error("Failed to remove checked matches:", error);
       setStatusMessage({ tone: "error", text: "Failed to remove checked matches." });
+    } finally {
+      setRemovingLane((current) => (current === lane ? null : current));
     }
   };
 
   const handleRemoveManualSelections = async (lane: MatchLaneKey) => {
-    if (!manualModeEnabled) return;
+    if (!manualModeEnabled || removingLane === lane) return;
 
     const selection =
       lane === "cashDebitBankCredit"
         ? {
             bankIds: manualSelections.topBankCreditIds,
             bookIds: manualSelections.topBookDebitIds,
-            difference: manualTopLeftSelectedTotal - manualTopRightSelectedTotal,
           }
         : {
             bankIds: manualSelections.bottomBankDebitIds,
             bookIds: manualSelections.bottomBookCreditIds,
-            difference: manualBottomLeftSelectedTotal - manualBottomRightSelectedTotal,
           };
 
     if (selection.bankIds.length === 0 && selection.bookIds.length === 0) {
       return;
     }
 
-    if (selection.bankIds.length === 0 || selection.bookIds.length === 0) {
-      setStatusMessage({
-        tone: "info",
-        text: "Select at least one row on both sides before removing.",
-      });
-      return;
-    }
-
-    if (Math.abs(selection.difference) > 0.009) {
-      setStatusMessage({
-        tone: "info",
-        text: `Selected subtotals are not balanced (${formatMoney(selection.difference)}). Use master uncheck, then re-check the correct rows.`,
-      });
-      return;
-    }
-
+    setRemovingLane(lane);
     try {
       await updateTransactionRemovalState({
         bankTransactionIds: selection.bankIds,
@@ -1712,6 +1699,8 @@ export default function ReconciliationStep() {
         tone: "error",
         text: "Failed to remove manual selections.",
       });
+    } finally {
+      setRemovingLane((current) => (current === lane ? null : current));
     }
   };
 
@@ -2541,12 +2530,15 @@ export default function ReconciliationStep() {
               ? () => handleRemoveManualSelections("cashDebitBankCredit")
               : () => handleRemoveSelectedMatches("cashDebitBankCredit"),
             canEdit: canEditSession,
+            removeInProgress: removingLane === "cashDebitBankCredit",
             summaryTitle: manualModeEnabled ? "Live Manual Totals" : undefined,
             checkedItemLabel: manualModeEnabled ? "row" : undefined,
             checkedItemDescription: manualModeEnabled
               ? "selected for manual removal from this lane."
               : undefined,
-            removeButtonLabel: manualModeEnabled ? "Remove selected rows" : undefined,
+            removeButtonLabel: manualModeEnabled
+              ? "Remove selected rows"
+              : "Remove checked matches",
           }}
           bottomLaneInteractive={{
             leftBucketInteractive: {
@@ -2628,12 +2620,15 @@ export default function ReconciliationStep() {
               ? () => handleRemoveManualSelections("cashCreditBankDebit")
               : () => handleRemoveSelectedMatches("cashCreditBankDebit"),
             canEdit: canEditSession,
+            removeInProgress: removingLane === "cashCreditBankDebit",
             summaryTitle: manualModeEnabled ? "Live Manual Totals" : undefined,
             checkedItemLabel: manualModeEnabled ? "row" : undefined,
             checkedItemDescription: manualModeEnabled
               ? "selected for manual removal from this lane."
               : undefined,
-            removeButtonLabel: manualModeEnabled ? "Remove selected rows" : undefined,
+            removeButtonLabel: manualModeEnabled
+              ? "Remove selected rows"
+              : "Remove checked matches",
           }}
           balanceEditorConfig={{
             canEdit: canEditSession,

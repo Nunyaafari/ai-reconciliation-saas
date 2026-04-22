@@ -65,6 +65,7 @@ export default function UploadStep() {
     bank: boolean;
     book: boolean;
   }>({ bank: false, book: false });
+  const [isPreparingWorkspace, setIsPreparingWorkspace] = useState(false);
 
   const uploadedBankTransactions = useMemo(
     () => bankTransactions.filter((transaction) => !transaction.isCarryforward),
@@ -188,6 +189,7 @@ export default function UploadStep() {
   const isContinueReconReady = Boolean(
     canContinueReconciliation &&
       !loading &&
+      !isPreparingWorkspace &&
       !bankNeedsReview &&
       !bookNeedsReview &&
       bankStatus !== "uploading" &&
@@ -203,6 +205,7 @@ export default function UploadStep() {
     }
 
     try {
+      setIsPreparingWorkspace(true);
       setError(null);
 
       const latestState = useReconciliationStore.getState();
@@ -240,6 +243,8 @@ export default function UploadStep() {
       setStep("prepare");
     } catch (err) {
       console.error("Continue reconciliation error:", err);
+    } finally {
+      setIsPreparingWorkspace(false);
     }
   };
 
@@ -301,8 +306,12 @@ export default function UploadStep() {
                     : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
                 }`}
               >
-                <CheckCircle2 className="h-3.5 w-3.5" />
-                Continue Recon
+                {isPreparingWorkspace ? (
+                  <Loader className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                )}
+                {isPreparingWorkspace ? "Preparing Workspace..." : "Continue Recon"}
               </button>
             ) : null}
             {bankNeedsReview ? (
@@ -372,7 +381,7 @@ export default function UploadStep() {
                         : "cursor-not-allowed bg-slate-200 text-slate-500"
                     }`}
                   >
-                    Continue Recon
+                    {isPreparingWorkspace ? "Preparing Workspace..." : "Continue Recon"}
                   </button>
                 ) : null}
                 {bankNeedsReview ? (
