@@ -15,15 +15,15 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-API_CONTAINER="${API_CONTAINER:-reconciliation_api}"
+API_SERVICE="${API_SERVICE:-${API_CONTAINER:-api}}"
 UPLOAD_PATH="${UPLOAD_STORAGE_PATH:-/app/storage/uploads}"
 
 echo "Restoring uploads into $UPLOAD_PATH from $SNAPSHOT_FILE"
 echo "WARNING: Existing files under upload storage will be replaced."
 
-docker compose exec -T "$API_CONTAINER" sh -lc \
+docker compose exec -T "$API_SERVICE" sh -lc \
   "rm -rf \"$UPLOAD_PATH\"/* && mkdir -p \"$UPLOAD_PATH\""
-cat "$SNAPSHOT_FILE" | docker compose exec -T "$API_CONTAINER" sh -lc \
+cat "$SNAPSHOT_FILE" | docker compose exec -T "$API_SERVICE" sh -lc \
   "tar -xzf - -C \"$UPLOAD_PATH\""
 
 echo "Restore complete."

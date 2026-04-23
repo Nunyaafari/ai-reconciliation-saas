@@ -15,14 +15,14 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-reconciliation_db}"
+POSTGRES_SERVICE="${POSTGRES_SERVICE:-${POSTGRES_CONTAINER:-postgres}}"
 POSTGRES_USER="${POSTGRES_USER:-dev}"
 POSTGRES_DB="${POSTGRES_DB:-reconciliation}"
 
 echo "Restoring postgres database '$POSTGRES_DB' from $DUMP_FILE"
 echo "WARNING: This will replace schema contents in target database."
 
-zcat "$DUMP_FILE" | docker compose exec -T "$POSTGRES_CONTAINER" sh -lc \
+zcat "$DUMP_FILE" | docker compose exec -T "$POSTGRES_SERVICE" sh -lc \
   "psql -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -v ON_ERROR_STOP=1"
 
 echo "Restore complete."
