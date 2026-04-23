@@ -181,7 +181,8 @@ All authenticated users can view recent audit activity for the workspace.
 This is the easiest way to run the full stack.
 
 ```bash
-docker compose up --build
+docker compose up -d --build
+./scripts/predeploy_check.sh
 ```
 
 Services:
@@ -196,6 +197,7 @@ Notes:
 - the frontend runs on port `3000` inside the container and is exposed as `3001` on the host
 - the backend startup script runs Alembic before starting
 - the worker starts after database and Redis health checks pass
+- if `./scripts/predeploy_check.sh` reports a missing service, bring everything up with `docker compose up -d`
 
 ### Option 2: Production-style image build
 
@@ -208,6 +210,19 @@ Pre-deploy verification (migrations + health + queue + smoke):
 ```bash
 ./scripts/predeploy_check.sh
 ```
+
+Most common follow-up checks:
+
+```bash
+docker compose ps
+docker compose logs --tail=80 api
+docker compose logs --tail=80 worker
+```
+
+Last validated on `2026-04-23` with:
+
+- `docker compose up -d` (api, worker, postgres, redis, frontend healthy)
+- `./scripts/predeploy_check.sh` passing migrations, `/health`, Redis/RQ worker checks, and frontend smoke
 
 Optional skip for frontend smoke during backend-only maintenance:
 

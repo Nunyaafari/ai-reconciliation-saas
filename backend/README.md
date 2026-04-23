@@ -42,6 +42,35 @@ Visit http://localhost:8000/docs for interactive API documentation (Swagger UI)
 
 ---
 
+## Docker Validation (Repo Root)
+
+For full-stack backend/runtime verification, run from repository root:
+
+```bash
+docker compose up -d
+./scripts/predeploy_check.sh
+```
+
+What this verifies:
+
+- required services are running (`api`, `worker`, `postgres`, `redis`, plus `frontend` unless skipped)
+- Alembic migrations apply cleanly in container
+- `GET /health` returns success
+- Redis and RQ reconciliation worker are connected
+- frontend startup smoke check passes
+
+Useful diagnostics:
+
+```bash
+docker compose ps
+docker compose logs --tail=80 api
+docker compose logs --tail=80 worker
+```
+
+Last validated on `2026-04-23`.
+
+---
+
 ## 📁 Project Structure
 
 ```
