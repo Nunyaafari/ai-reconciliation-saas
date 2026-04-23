@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   FileDown,
   History,
@@ -10,7 +10,12 @@ import {
 } from "lucide-react";
 import WorkbookReconciliationStatement from "./WorkbookReconciliationStatement";
 import ReconcileProgressCue from "./ReconcileProgressCue";
-import { Transaction, useReconciliationStore } from "@/store/reconciliation-api";
+import {
+  ReconciliationSummary,
+  Transaction,
+  useReconciliationStore,
+} from "@/store/reconciliation-api";
+import { openReconciliationReportPreview } from "@/lib/report-preview";
 
 export default function PrepareReconciliationStepConnected() {
   const {
@@ -20,13 +25,16 @@ export default function PrepareReconciliationStepConnected() {
     summary,
     reconciliationSession,
     currentUser,
+    currentOrganization,
     loading,
     setError,
     setStep,
     startReconciliation,
     saveReconciliationSession,
+    refreshReconciliation,
     orgId,
   } = useReconciliationStore();
+  const [downloadingReport, setDownloadingReport] = useState(false);
 
   const isAdmin = currentUser?.role === "admin";
   const isSessionClosed = reconciliationSession?.status === "closed";
@@ -82,6 +90,153 @@ export default function PrepareReconciliationStepConnected() {
     summary?.bankOpenBalance ?? reconciliationSession?.bankOpenBalance ?? 0;
   const bankClosingBalance =
     summary?.bankClosingBalance ?? reconciliationSession?.bankClosingBalance ?? 0;
+  const currencyCode =
+    reconciliationSession?.currencyCode || reconSetup?.currencyCode || "GHS";
+
+  const buildBuckets = (
+    bankTxs: Transaction[],
+    bookTxs: Transaction[]
+  ) => {
+    const byDirection = (
+      transactions: Transaction[],
+      direction: "debit" | "credit"
+    ) => transactions.filter((transaction) => transaction.direction === direction);
+    return {
+      bankCredits: byDirection(bankTxs, "credit"),
+      bankDebits: byDirection(bankTxs, "debit"),
+      bookDebits: byDirection(bookTxs, "debit"),
+      bookCredits: byDirection(bookTxs, "credit"),
+    };
+  };
+
+  const subtotalForDirection = (
+    transactions: Transaction[],
+    direction: "debit" | "credit"
+  ) =>
+    transactions.reduce(
+      (total, tx) =>
+        total +
+        Number(direction === "debit" ? tx.debitAmount || 0 : tx.creditAmount || 0),
+      0
+    );
+
+  const buildFallbackSummary = (
+    period: string,
+    bucketSet: ReturnType<typeof buildBuckets>
+  ): ReconciliationSummary => {
+    const bankDebitSubtotal = subtotalForDirection(bucketSet.bankDebits, "debit");
+    const bankCreditSubtotal = subtotalForDirection(
+      bucketSet.bankCredits,
+      "credit"
+    );
+    const bookDebitSubtotal = subtotalForDirection(bucketSet.bookDebits, "debit");
+    const bookCreditSubtotal = subtotalForDirection(
+      bucketSet.bookCredits,
+      "credit"
+    );
+    const adjustedBookBalance =
+      Number(bookClosingBalance || 0) + bankCreditSubtotal + bookCreditSubtotal;
+    const adjustedBankBalance =
+      Number(bankClosingBalance || 0) + bookDebitSubtotal + bankDebitSubtotal;
+
+    return {
+      periodMonth: period,
+      netBankMovement: 0,
+      netBookMovement: 0,
+      bankOpenBalance: Number(bankOpenBalance || 0),
+      bankClosingBalance: Number(bankClosingBalance || 0),
+      bookOpenBalance: Number(bookOpenBalance || 0),
+      bookClosingBalance: Number(bookClosingBalance || 0),
+      bankDebitSubtotal,
+      bankCreditSubtotal,
+      bookDebitSubtotal,
+      bookCreditSubtotal,
+      laneOneDifference: bankCreditSubtotal - bookDebitSubtotal,
+      laneTwoDifference: bookCreditSubtotal - bankDebitSubtotal,
+      adjustedBankBalance,
+      adjustedBookBalance,
+      difference: adjustedBookBalance - adjustedBankBalance,
+      unresolvedBankDebits: {
+        count: bucketSet.bankDebits.length,
+        total: bankDebitSubtotal,
+      },
+      unresolvedBankCredits: {
+        count: bucketSet.bankCredits.length,
+        total: bankCreditSubtotal,
+      },
+      unresolvedBookDebits: {
+        count: bucketSet.bookDebits.length,
+        total: bookDebitSubtotal,
+      },
+      unresolvedBookCredits: {
+        count: bucketSet.bookCredits.length,
+        total: bookCreditSubtotal,
+      },
+    };
+  };
+
+  const handleOpenReportPreview = async () => {
+    setDownloadingReport(true);
+    try {
+      let nextSummary = summary;
+      let nextSession = reconciliationSession;
+      let nextOrganization = currentOrganization;
+      let nextBankTransactions = bankTransactions;
+      let nextBookTransactions = bookTransactions;
+
+      if (!nextSummary) {
+        await refreshReconciliation(orgId || undefined);
+        const refreshedState = useReconciliationStore.getState();
+        nextSummary = refreshedState.summary;
+        nextSession = refreshedState.reconciliationSession;
+        nextOrganization = refreshedState.currentOrganization;
+        nextBankTransactions = refreshedState.bankTransactions;
+        nextBookTransactions = refreshedState.bookTransactions;
+      }
+
+      const nextBuckets = buildBuckets(nextBankTransactions, nextBookTransactions);
+      const periodMonth =
+        reconSetup?.periodMonth || nextSession?.periodMonth || "Period pending";
+      const reportSummary =
+        nextSummary || buildFallbackSummary(periodMonth, nextBuckets);
+
+      openReconciliationReportPreview({
+        accountName:
+          reconSetup?.accountName || nextSession?.accountName || "Account not set",
+        accountNumber: reconSetup?.accountNumber || nextSession?.accountNumber || null,
+        periodMonth:
+          reportSummary.periodMonth || nextSession?.periodMonth || "Period pending",
+        status: nextSession?.status,
+        companyName:
+          nextOrganization?.name ||
+          nextSession?.companyName ||
+          reconSetup?.companyName,
+        companyAddress:
+          nextOrganization?.companyAddress ||
+          nextSession?.companyAddress ||
+          reconSetup?.companyAddress,
+        companyLogoDataUrl:
+          nextOrganization?.companyLogoDataUrl ||
+          nextSession?.companyLogoDataUrl ||
+          reconSetup?.companyLogoDataUrl,
+        preparedBy: nextSession?.preparedBy || reconSetup?.preparedBy,
+        reviewedBy: nextSession?.reviewedBy || reconSetup?.reviewedBy,
+        currencyCode,
+        summary: reportSummary,
+        bankCredits: nextBuckets.bankCredits,
+        bookDebits: nextBuckets.bookDebits,
+        bookCredits: nextBuckets.bookCredits,
+        bankDebits: nextBuckets.bankDebits,
+      });
+    } catch (error) {
+      console.error("Failed to open report preview:", error);
+      setError(
+        error instanceof Error ? error.message : "Failed to open report preview."
+      );
+    } finally {
+      setDownloadingReport(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-cyan-50">
@@ -128,12 +283,16 @@ export default function PrepareReconciliationStepConnected() {
                   Save
                 </button>
                 <button
-                  disabled
-                  className="inline-flex cursor-not-allowed items-center gap-2 rounded-lg bg-slate-200 px-4 py-2 text-sm font-semibold text-slate-500"
-                  title="Report becomes available once reconciliation suggestions are generated."
+                  onClick={handleOpenReportPreview}
+                  disabled={downloadingReport}
+                  className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold ${
+                    downloadingReport
+                      ? "cursor-not-allowed bg-slate-200 text-slate-500"
+                      : "bg-slate-900 text-white hover:bg-slate-800"
+                  }`}
                 >
                   <FileDown className="h-4 w-4" />
-                  Report
+                  {downloadingReport ? "Preparing..." : "Report"}
                 </button>
                 <button
                   onClick={handleRunReconciliation}
@@ -189,6 +348,8 @@ export default function PrepareReconciliationStepConnected() {
           bookDebits={buckets.cashBookDebits}
           bookCredits={buckets.cashBookCredits}
           bankDebits={buckets.bankDebits}
+          hideHeaderText
+          hideAccountNote
         />
       </div>
     </div>
