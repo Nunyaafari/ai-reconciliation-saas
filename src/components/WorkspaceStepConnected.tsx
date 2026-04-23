@@ -522,15 +522,14 @@ export default function WorkspaceStep() {
 
         <div className="mb-8 flex flex-wrap items-start justify-between gap-4">
           <div>
-            <div className="mb-3 inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-sm">
-              <Building2 className="h-6 w-6" />
+            <div className="mb-1 flex items-center gap-3">
+              <div className="inline-flex h-12 w-12 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-sm">
+                <Building2 className="h-6 w-6" />
+              </div>
+              <h1 className="text-4xl font-bold tracking-tight text-slate-900">
+                Account Workspace
+              </h1>
             </div>
-            <h1 className="text-4xl font-bold tracking-tight text-slate-900">
-              Workspace
-            </h1>
-            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
-              Manage reconciliation accounts first, then open each month under the right account. This keeps monthly history organized per account instead of flattening everything together.
-            </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">

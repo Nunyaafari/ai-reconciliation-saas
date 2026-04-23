@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import { CheckSquare, ChevronLeft, ChevronRight, Search, Sparkles } from "lucide-react";
 import { Transaction } from "@/store/reconciliation-api";
 import { formatCurrency, normalizeCurrencyCode } from "@/lib/currency";
@@ -123,6 +130,8 @@ type BucketProps = {
   interactiveConfig?: BucketInteractiveConfig;
   sharedSearchQuery?: string;
   onSharedSearchChange?: (value: string) => void;
+  viewportRef?: RefObject<HTMLDivElement | null>;
+  onViewportScroll?: (scrollTop: number) => void;
 };
 
 type LaneTotalsProps = {
@@ -185,6 +194,7 @@ type WorkbookReconciliationStatementProps = {
   bottomLaneInteractive?: LaneInteractiveConfig;
   hideHeaderText?: boolean;
   hideAccountNote?: boolean;
+  syncScrollEnabled?: boolean;
   balanceEditorConfig?: {
     canEdit: boolean;
     dirty: boolean;
@@ -224,6 +234,8 @@ function BucketTable({
   interactiveConfig,
   sharedSearchQuery,
   onSharedSearchChange,
+  viewportRef,
+  onViewportScroll,
 }: BucketProps) {
   const rows = useMemo(
     () =>
@@ -436,7 +448,11 @@ function BucketTable({
         <span className="text-right">{amountLabel}</span>
       </div>
 
-      <div className="max-h-[420px] overflow-y-auto bg-white">
+      <div
+        ref={viewportRef}
+        onScroll={(event) => onViewportScroll?.(event.currentTarget.scrollTop)}
+        className="max-h-[420px] overflow-y-auto bg-white"
+      >
         {paginatedRows.length === 0 ? (
           <div className="px-4 py-10 text-center text-sm text-slate-500">
             {searchQuery.trim()
@@ -579,14 +595,16 @@ function BucketTable({
                       {transaction.reference || "-"}
                     </span>
                     <span className="min-w-0">
-                      <span className="block truncate">
-                        {transaction.narration || "-"}
-                      </span>
-                      {transaction.isCarryforward ? (
-                        <span className="mt-1 inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
-                          (CF)
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span className="truncate">
+                          {transaction.narration || "-"}
                         </span>
-                      ) : null}
+                        {transaction.isCarryforward ? (
+                          <span className="inline-flex shrink-0 items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
+                            (CF)
+                          </span>
+                        ) : null}
+                      </span>
                       {matchState ? (
                         <span
                           className={`mt-1 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold ${
@@ -863,6 +881,7 @@ export default function WorkbookReconciliationStatement({
   bottomLaneInteractive,
   hideHeaderText = false,
   hideAccountNote = false,
+  syncScrollEnabled = false,
   balanceEditorConfig,
 }: WorkbookReconciliationStatementProps) {
   const bankCreditTotal = useMemo(
@@ -899,6 +918,30 @@ export default function WorkbookReconciliationStatement({
   );
   const [topLaneSearchQuery, setTopLaneSearchQuery] = useState("");
   const [bottomLaneSearchQuery, setBottomLaneSearchQuery] = useState("");
+  const topLeftViewportRef = useRef<HTMLDivElement | null>(null);
+  const topRightViewportRef = useRef<HTMLDivElement | null>(null);
+  const bottomLeftViewportRef = useRef<HTMLDivElement | null>(null);
+  const bottomRightViewportRef = useRef<HTMLDivElement | null>(null);
+  const topLaneSyncingRef = useRef(false);
+  const bottomLaneSyncingRef = useRef(false);
+
+  const syncLaneViewport = useCallback(
+    (
+      targetRef: { current: HTMLDivElement | null },
+      laneLockRef: { current: boolean },
+      scrollTop: number
+    ) => {
+      if (!syncScrollEnabled || laneLockRef.current || !targetRef.current) {
+        return;
+      }
+      laneLockRef.current = true;
+      targetRef.current.scrollTop = scrollTop;
+      window.requestAnimationFrame(() => {
+        laneLockRef.current = false;
+      });
+    },
+    [syncScrollEnabled]
+  );
 
   const adjustedBookBalance =
     bookClosingBalance + bankCreditTotal + bookCreditTotal;
@@ -1106,6 +1149,10 @@ export default function WorkbookReconciliationStatement({
             interactiveConfig={topLaneInteractive?.leftBucketInteractive}
             sharedSearchQuery={topLaneSearchQuery}
             onSharedSearchChange={setTopLaneSearchQuery}
+            viewportRef={topLeftViewportRef}
+            onViewportScroll={(scrollTop) =>
+              syncLaneViewport(topRightViewportRef, topLaneSyncingRef, scrollTop)
+            }
           />
           <BucketTable
             title="Cash Book Debits"
@@ -1116,6 +1163,10 @@ export default function WorkbookReconciliationStatement({
             interactiveConfig={topLaneInteractive?.rightBucketInteractive}
             sharedSearchQuery={topLaneSearchQuery}
             onSharedSearchChange={setTopLaneSearchQuery}
+            viewportRef={topRightViewportRef}
+            onViewportScroll={(scrollTop) =>
+              syncLaneViewport(topLeftViewportRef, topLaneSyncingRef, scrollTop)
+            }
           />
         </div>
 
@@ -1155,6 +1206,14 @@ export default function WorkbookReconciliationStatement({
             interactiveConfig={bottomLaneInteractive?.leftBucketInteractive}
             sharedSearchQuery={bottomLaneSearchQuery}
             onSharedSearchChange={setBottomLaneSearchQuery}
+            viewportRef={bottomLeftViewportRef}
+            onViewportScroll={(scrollTop) =>
+              syncLaneViewport(
+                bottomRightViewportRef,
+                bottomLaneSyncingRef,
+                scrollTop
+              )
+            }
           />
           <BucketTable
             title="Bank Debits"
@@ -1165,6 +1224,14 @@ export default function WorkbookReconciliationStatement({
             interactiveConfig={bottomLaneInteractive?.rightBucketInteractive}
             sharedSearchQuery={bottomLaneSearchQuery}
             onSharedSearchChange={setBottomLaneSearchQuery}
+            viewportRef={bottomRightViewportRef}
+            onViewportScroll={(scrollTop) =>
+              syncLaneViewport(
+                bottomLeftViewportRef,
+                bottomLaneSyncingRef,
+                scrollTop
+              )
+            }
           />
         </div>
 

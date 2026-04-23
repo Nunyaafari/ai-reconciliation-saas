@@ -5,7 +5,9 @@ import {
   AlertCircle,
   CheckCircle2,
   FileDown,
+  History,
   Info,
+  Link2,
   Loader,
   PlusCircle,
   RotateCcw,
@@ -704,6 +706,7 @@ export default function ReconciliationStep() {
   const [submittingManualEntry, setSubmittingManualEntry] = useState(false);
   const [showCloseMonthConfirm, setShowCloseMonthConfirm] = useState(false);
   const [closingMonth, setClosingMonth] = useState(false);
+  const [syncScrollEnabled, setSyncScrollEnabled] = useState(false);
   const isAdmin = currentUser?.role === "admin";
   const isSessionClosed = reconciliationSession?.status === "closed";
   const canEditSession = Boolean(isAdmin && !isSessionClosed);
@@ -2188,6 +2191,25 @@ export default function ReconciliationStep() {
             <div className="w-full overflow-x-auto xl:w-auto xl:justify-self-end">
               <div className="flex min-w-max items-center gap-2 whitespace-nowrap">
               <button
+                onClick={() => setStep("workspace")}
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+              >
+                <History className="h-4 w-4" />
+                Workspace
+              </button>
+              <button
+                onClick={() => setSyncScrollEnabled((current) => !current)}
+                className={`inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium ${
+                  syncScrollEnabled
+                    ? "border-blue-600 bg-blue-600 text-white"
+                    : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                }`}
+                title="Toggle synchronized lane scrolling"
+              >
+                <Link2 className="h-4 w-4" />
+                Sync Scroll
+              </button>
+              <button
                 onClick={() => setShowManualEntry(true)}
                 disabled={!canEditSession}
                 className={`inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium ${
@@ -2516,6 +2538,7 @@ export default function ReconciliationStep() {
           outstandingOnly
           hideHeaderText
           hideAccountNote
+          syncScrollEnabled={syncScrollEnabled}
           topLaneInteractive={{
             leftBucketInteractive: {
               matchStateByTransactionId: topLaneInteractiveState.leftMatchState,

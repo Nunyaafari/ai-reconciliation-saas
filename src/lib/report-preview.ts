@@ -422,9 +422,27 @@ export function openReconciliationReportPreview({
             margin-top: 16px;
           }
           .total-card {
-            padding: 18px 20px;
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 14px;
+            padding: 12px 16px;
           }
           .total-card.right { text-align: right; }
+          .total-card span {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: var(--muted);
+            line-height: 1.35;
+          }
+          .total-card strong {
+            margin-top: 0;
+            font-size: 22px;
+            line-height: 1;
+            text-align: right;
+          }
           .adjusted-grid {
             grid-template-columns: repeat(3, minmax(0, 1fr));
             margin-top: 24px;
@@ -555,9 +573,6 @@ export function openReconciliationReportPreview({
             }
             <div class="eyebrow">Reconciliation Report</div>
             <h1>BANK RECONCILIATION STATEMENT</h1>
-            <p class="subhead">
-              This print-ready preview focuses on the current outstanding reconciliation position for the selected account-month.
-            </p>
             <div class="meta-grid">
               <div class="card">
                 <span>Account / Period</span>

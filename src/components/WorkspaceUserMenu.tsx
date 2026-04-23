@@ -50,30 +50,6 @@ export default function WorkspaceUserMenu() {
           >
             <AppBrand compact />
           </button>
-          <div className="hidden items-center gap-2 md:flex">
-            <button
-              type="button"
-              onClick={() => setStep("workspace")}
-              className={`rounded-xl px-3 py-2 text-sm font-semibold transition ${
-                step === "workspace" || step === "history"
-                  ? "bg-slate-900 text-white"
-                  : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-              }`}
-            >
-              Workspace
-            </button>
-            <button
-              type="button"
-              onClick={() => setStep("settings")}
-              className={`rounded-xl px-3 py-2 text-sm font-semibold transition ${
-                step === "settings"
-                  ? "bg-slate-900 text-white"
-                  : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-              }`}
-            >
-              Settings
-            </button>
-          </div>
         </div>
 
         <div ref={menuRef} className="relative">
