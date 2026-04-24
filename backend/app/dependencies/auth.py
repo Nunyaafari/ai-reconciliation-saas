@@ -64,6 +64,37 @@ def require_role(*allowed_roles: str):
 
 
 def get_admin_user(current_user: User = Depends(get_current_user)) -> User:
+    if current_user.role not in {"admin", "super_admin"}:
+        raise HTTPException(status_code=403, detail="Admin or super admin access required")
+    return current_user
+
+
+def get_super_admin_user(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> User:
+    """
+    Require super-admin privileges.
+
+    Bootstrap fallback:
+    if an organization has no super admin yet, allow an existing admin
+    to perform this action so they can create/promote the first super admin.
+    """
+    if current_user.role == "super_admin":
+        return current_user
+
     if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
+        raise HTTPException(status_code=403, detail="Super admin access required")
+
+    has_super_admin = (
+        db.query(User)
+        .filter(
+            User.org_id == current_user.org_id,
+            User.role == "super_admin",
+            User.is_active.is_(True),
+        )
+        .first()
+    )
+    if has_super_admin:
+        raise HTTPException(status_code=403, detail="Super admin access required")
     return current_user

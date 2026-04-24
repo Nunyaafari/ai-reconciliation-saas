@@ -38,7 +38,9 @@ export default function OperationsDashboard() {
   const [filter, setFilter] = useState<"dead_lettered" | "failed" | "active" | "all">(
     "dead_lettered"
   );
-  const isAdmin = currentUser?.role === "admin";
+  const isAdmin =
+    currentUser?.role === "admin" || currentUser?.role === "super_admin";
+  const isSuperAdmin = currentUser?.role === "super_admin";
 
   const loadJobs = async () => {
     if (!isAdmin) {
@@ -108,6 +110,10 @@ export default function OperationsDashboard() {
 
   const handleRetry = async (jobId: string) => {
     try {
+      if (!isSuperAdmin) {
+        setError("Only super admins can retry failed jobs.");
+        return;
+      }
       setWorkingJobId(jobId);
       setError(null);
       const response = await apiClient.retryProcessingJob(jobId);
@@ -132,7 +138,7 @@ export default function OperationsDashboard() {
               Admin access required
             </h1>
             <p className="mt-2 text-sm text-slate-600">
-              The operations dashboard is reserved for admins because it exposes retry controls for failed and dead-lettered jobs.
+              The operations dashboard is reserved for admins. Retry controls for failed and dead-lettered jobs are limited to super admins.
             </p>
             <button
               onClick={() => setStep("settings")}
@@ -159,7 +165,7 @@ export default function OperationsDashboard() {
               Operations Dashboard
             </h1>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-              Monitor failed jobs, dead-lettered work, and active queue pressure. Retry recoverable jobs without leaving the admin workspace.
+              Monitor failed jobs, dead-lettered work, and active queue pressure. Super admins can retry recoverable jobs without leaving this workspace.
             </p>
           </div>
 
@@ -295,13 +301,18 @@ export default function OperationsDashboard() {
                     {canRetry ? (
                       <button
                         onClick={() => handleRetry(job.id)}
-                        disabled={isWorking}
+                        disabled={isWorking || !isSuperAdmin}
                         className={clsx(
                           "inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold",
-                          isWorking
+                          isWorking || !isSuperAdmin
                             ? "cursor-not-allowed bg-slate-200 text-slate-500"
                             : "bg-slate-900 text-white hover:bg-slate-800"
                         )}
+                        title={
+                          isSuperAdmin
+                            ? undefined
+                            : "Only super admins can retry failed jobs."
+                        }
                       >
                         <RotateCcw className="h-4 w-4" />
                         {isWorking ? "Retrying..." : "Retry job"}

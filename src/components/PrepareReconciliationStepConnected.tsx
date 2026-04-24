@@ -36,7 +36,8 @@ export default function PrepareReconciliationStepConnected() {
   } = useReconciliationStore();
   const [downloadingReport, setDownloadingReport] = useState(false);
 
-  const isAdmin = currentUser?.role === "admin";
+  const isAdmin =
+    currentUser?.role === "admin" || currentUser?.role === "super_admin";
   const isSessionClosed = reconciliationSession?.status === "closed";
   const canEditSession = Boolean(isAdmin && !isSessionClosed);
 

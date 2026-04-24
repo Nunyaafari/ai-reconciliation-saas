@@ -51,6 +51,23 @@ class ApiClient {
 
   private extractErrorMessage(data: any, status: number): string {
     if (!data) return `HTTP ${status}`;
+    if (Array.isArray(data.detail)) {
+      const validationMessages = data.detail
+        .map((entry: any) => {
+          if (typeof entry === "string") return entry;
+          if (!entry || typeof entry !== "object") return null;
+          const loc = Array.isArray(entry.loc)
+            ? entry.loc.filter((part: unknown) => part !== "body").join(".")
+            : "";
+          const msg = typeof entry.msg === "string" ? entry.msg : "Invalid request value";
+          return loc ? `${loc}: ${msg}` : msg;
+        })
+        .filter(Boolean);
+
+      if (validationMessages.length > 0) {
+        return validationMessages.join("; ");
+      }
+    }
     return (
       data.error ||
       data.detail ||
@@ -696,7 +713,7 @@ class ApiClient {
     name: string;
     email: string;
     password: string;
-    role: "admin" | "reviewer";
+    role: "super_admin" | "admin" | "reviewer";
   }): Promise<ApiResponse<any>> {
     return this.request("/api/auth/users", {
       method: "POST",

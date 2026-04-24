@@ -52,7 +52,9 @@ export default function SettingsStep() {
     setError,
   } =
     useReconciliationStore();
-  const isAdmin = currentUser?.role === "admin";
+  const isSuperAdmin = currentUser?.role === "super_admin";
+  const isAdmin =
+    currentUser?.role === "admin" || currentUser?.role === "super_admin";
 
   const [workspaceForm, setWorkspaceForm] = useState({
     name: currentOrganization?.name || "",
@@ -71,8 +73,18 @@ export default function SettingsStep() {
     name: "",
     email: "",
     password: "",
-    role: "reviewer" as "admin" | "reviewer",
+    role: "reviewer" as "super_admin" | "admin" | "reviewer",
   });
+  const trimmedTeamName = teamForm.name.trim();
+  const trimmedTeamEmail = teamForm.email.trim().toLowerCase();
+  const teamPasswordTooShort =
+    teamForm.password.length > 0 && teamForm.password.length < 8;
+  const canSubmitTeamForm = Boolean(
+    trimmedTeamName &&
+      trimmedTeamEmail &&
+      teamForm.password.length >= 8 &&
+      !teamLoading
+  );
 
   const [jobsLoading, setJobsLoading] = useState(false);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
@@ -119,7 +131,7 @@ export default function SettingsStep() {
   ]);
 
   const loadUsers = async () => {
-    if (!isAdmin) {
+    if (!isSuperAdmin) {
       setTeamUsers([]);
       return;
     }
@@ -205,7 +217,21 @@ export default function SettingsStep() {
   const handleCreateUser = async () => {
     try {
       setError(null);
-      const response = await apiClient.createUser(teamForm);
+      if (!isSuperAdmin) {
+        setError("Only super admins can create users.");
+        return;
+      }
+      if (!trimmedTeamName || !trimmedTeamEmail || teamForm.password.length < 8) {
+        setError("Name, email, and password (minimum 8 characters) are required.");
+        return;
+      }
+
+      const response = await apiClient.createUser({
+        name: trimmedTeamName,
+        email: trimmedTeamEmail,
+        password: teamForm.password,
+        role: teamForm.role,
+      });
       if (!response.success) {
         throw new Error(response.error || "Failed to create user");
       }
@@ -225,6 +251,10 @@ export default function SettingsStep() {
   const handleRetryJob = async (jobId: string) => {
     try {
       setError(null);
+      if (!isSuperAdmin) {
+        setError("Only super admins can retry failed jobs.");
+        return;
+      }
       const response = await apiClient.retryProcessingJob(jobId);
       if (!response.success) {
         throw new Error(response.error || "Failed to queue retry");
@@ -333,7 +363,7 @@ export default function SettingsStep() {
     loadAuditLogs().catch((error) =>
       console.error("Failed to load audit logs:", error)
     );
-  }, [isAdmin, currentUser?.id]);
+  }, [isAdmin, isSuperAdmin, currentUser?.id]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100 px-6 py-10">
@@ -628,8 +658,7 @@ export default function SettingsStep() {
           </div>
         </div>
 
-        {isAdmin ? (
-          <>
+        {isSuperAdmin ? (
             <div className="mt-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -637,10 +666,10 @@ export default function SettingsStep() {
                     Team Access
                   </p>
                   <h2 className="text-xl font-semibold text-slate-900">
-                    Admins and reviewers
+                    Super admins, admins, and reviewers
                   </h2>
                   <p className="mt-1 text-sm text-slate-600">
-                    Admins can upload, run jobs, and close months. Reviewers can inspect workspaces, approve or reject matches, and download reports.
+                    Super admins can manage users and retry failed jobs. Admins can upload, run reconciliation, and close months. Reviewers can inspect workspaces in read-only mode and download reports.
                   </p>
                 </div>
                 <button
@@ -657,7 +686,7 @@ export default function SettingsStep() {
                     <EmptyStateCard message="Loading team members..." />
                   ) : teamUsers.length === 0 ? (
                     <EmptyStateCard
-                      message="No extra users yet. Add a reviewer or another admin below."
+                      message="No extra users yet. Add a reviewer, admin, or another super admin below."
                       dashed
                     />
                   ) : (
@@ -672,7 +701,9 @@ export default function SettingsStep() {
                         </div>
                         <span
                           className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                            user.role === "admin"
+                            user.role === "super_admin"
+                              ? "bg-rose-100 text-rose-700"
+                              : user.role === "admin"
                               ? "bg-slate-900 text-white"
                               : "bg-blue-100 text-blue-700"
                           }`}
@@ -712,30 +743,36 @@ export default function SettingsStep() {
                       onChange={(event) =>
                         setTeamForm((prev) => ({ ...prev, password: event.target.value }))
                       }
-                      placeholder="Temporary password"
+                      placeholder="Temporary password (min 8 chars)"
                       type="password"
                       className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
                     />
+                    <p
+                      className={`text-xs ${
+                        teamPasswordTooShort ? "text-rose-600" : "text-slate-500"
+                      }`}
+                    >
+                      Password must be at least 8 characters.
+                    </p>
                     <select
                       value={teamForm.role}
                       onChange={(event) =>
                         setTeamForm((prev) => ({
                           ...prev,
-                          role: event.target.value as "admin" | "reviewer",
+                          role: event.target.value as "super_admin" | "admin" | "reviewer",
                         }))
                       }
                       className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
                     >
+                      <option value="super_admin">Super Admin</option>
                       <option value="reviewer">Reviewer</option>
                       <option value="admin">Admin</option>
                     </select>
                     <button
                       onClick={handleCreateUser}
-                      disabled={
-                        !teamForm.name || !teamForm.email || !teamForm.password || teamLoading
-                      }
+                      disabled={!canSubmitTeamForm}
                       className={`w-full rounded-xl px-4 py-2 text-sm font-semibold ${
-                        !teamForm.name || !teamForm.email || !teamForm.password || teamLoading
+                        !canSubmitTeamForm
                           ? "cursor-not-allowed bg-slate-300 text-slate-600"
                           : "bg-slate-900 text-white hover:bg-slate-800"
                       }`}
@@ -746,7 +783,9 @@ export default function SettingsStep() {
                 </div>
               </div>
             </div>
+        ) : null}
 
+        {isAdmin ? (
             <div className="mt-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -757,7 +796,9 @@ export default function SettingsStep() {
                     Failed and queued jobs
                   </h2>
                   <p className="mt-1 text-sm text-slate-600">
-                    Retry dead-lettered or failed jobs here, or jump into the advanced dashboard for deeper operations work.
+                    {isSuperAdmin
+                      ? "Retry dead-lettered or failed jobs here, or jump into the advanced dashboard for deeper operations work."
+                      : "You can inspect job history here. Retrying failed jobs is reserved for super admins."}
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
@@ -825,7 +866,12 @@ export default function SettingsStep() {
                         {job.status === "failed" || job.status === "dead_lettered" ? (
                           <button
                             onClick={() => handleRetryJob(job.id)}
-                            className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-800"
+                            disabled={!isSuperAdmin}
+                            className={`inline-flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-semibold ${
+                              isSuperAdmin
+                                ? "bg-slate-900 text-white hover:bg-slate-800"
+                                : "cursor-not-allowed bg-slate-200 text-slate-500"
+                            }`}
                           >
                             <RotateCcw className="h-4 w-4" />
                             Retry
@@ -837,7 +883,6 @@ export default function SettingsStep() {
                 )}
               </div>
             </div>
-          </>
         ) : null}
       </div>
     </div>

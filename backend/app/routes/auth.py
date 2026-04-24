@@ -6,7 +6,11 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.database.models import Organization, User
-from app.dependencies.auth import get_admin_user, get_current_organization, get_current_user
+from app.dependencies.auth import (
+    get_current_organization,
+    get_current_user,
+    get_super_admin_user,
+)
 from app.schemas import (
     AuthSessionResponse,
     ChangePasswordRequest,
@@ -33,7 +37,7 @@ async def register(
     payload: RegisterRequest,
     db: Session = Depends(get_db),
 ):
-    """Create a tenant admin account and sign them in."""
+    """Create a tenant super-admin account and sign them in."""
     email = payload.email.lower().strip()
     existing_user = db.query(User).filter(User.email == email).first()
     if existing_user:
@@ -72,7 +76,7 @@ async def register(
         email=email,
         name=payload.name.strip(),
         password_hash=auth_service.hash_password(payload.password),
-        role="admin",
+        role="super_admin",
         is_active=True,
     )
     db.add(user)
@@ -82,7 +86,7 @@ async def register(
 
     access_token, expires_in_seconds = auth_service.create_access_token(user)
     logger.info(
-        "Registered new tenant admin",
+        "Registered new tenant super admin",
         extra={
             "event": "auth.registered",
             "org_id": str(organization.id),
@@ -215,17 +219,17 @@ async def list_users(
 @router.post("/users", response_model=UserResponse)
 async def create_user(
     payload: CreateUserRequest,
-    admin_user: User = Depends(get_admin_user),
+    super_admin_user: User = Depends(get_super_admin_user),
     db: Session = Depends(get_db),
 ):
-    """Admin-only: create another user inside the same tenant."""
+    """Super-admin-only: create another user inside the same tenant."""
     email = payload.email.lower().strip()
     existing_user = db.query(User).filter(User.email == email).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="An account with this email already exists")
 
     user = User(
-        org_id=admin_user.org_id,
+        org_id=super_admin_user.org_id,
         email=email,
         name=payload.name.strip(),
         password_hash=auth_service.hash_password(payload.password),
@@ -240,8 +244,8 @@ async def create_user(
         "Created org user",
         extra={
             "event": "auth.user_created",
-            "org_id": str(admin_user.org_id),
-            "created_by_user_id": str(admin_user.id),
+            "org_id": str(super_admin_user.org_id),
+            "created_by_user_id": str(super_admin_user.id),
             "user_id": str(user.id),
             "role": user.role,
             "email": user.email,
@@ -249,8 +253,8 @@ async def create_user(
     )
     audit_service.log(
         db=db,
-        org_id=admin_user.org_id,
-        actor_user_id=admin_user.id,
+        org_id=super_admin_user.org_id,
+        actor_user_id=super_admin_user.id,
         action="auth.user_created",
         entity_type="user",
         entity_id=str(user.id),

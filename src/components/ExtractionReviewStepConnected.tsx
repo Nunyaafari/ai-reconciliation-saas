@@ -51,7 +51,8 @@ export default function ExtractionReviewStepConnected() {
     setSelectedRows([]);
   }, [currentDraft?.id, currentDraft?.updatedAt]);
 
-  const isAdmin = currentUser?.role === "admin";
+  const isAdmin =
+    currentUser?.role === "admin" || currentUser?.role === "super_admin";
   const blockingIssues = useMemo(
     () =>
       (currentDraft?.validationSummary.issues || []).filter(

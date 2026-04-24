@@ -117,7 +117,8 @@ export default function UploadStep() {
 
   const bankMapped = uploadedBankTransactions.length > 0 || sessionCompletion.bank;
   const bookMapped = uploadedBookTransactions.length > 0 || sessionCompletion.book;
-  const isAdmin = currentUser?.role === "admin";
+  const isAdmin =
+    currentUser?.role === "admin" || currentUser?.role === "super_admin";
   const currencyCode = normalizeCurrencyCode(reconSetup?.currencyCode || "GHS");
 
   const fileProgress = useMemo(() => {
@@ -421,7 +422,11 @@ export default function UploadStep() {
             {currentUser ? (
               <StatusPill
                 label={`Role: ${currentUser.role}`}
-                status={currentUser.role === "admin" ? "mapped" : "uploaded"}
+                status={
+                  currentUser.role === "admin" || currentUser.role === "super_admin"
+                    ? "mapped"
+                    : "uploaded"
+                }
               />
             ) : null}
           </div>
@@ -436,7 +441,7 @@ export default function UploadStep() {
                 </p>
                 <p className="mt-1 text-sm text-amber-800">
                   Uploads, mapping, reconciliation runs, and month close/reopen are admin-only.
-                  You can still open history, inspect workspaces, approve or reject matches, and download reports.
+                  You can still open history, inspect workspaces, and download reports.
                 </p>
               </div>
               <button

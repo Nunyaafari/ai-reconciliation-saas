@@ -4,7 +4,7 @@ from uuid import UUID
 
 from app.database import get_db
 from app.database.models import ProcessingJob, UploadSession, User
-from app.dependencies.auth import get_admin_user, get_current_user
+from app.dependencies.auth import get_current_user, get_super_admin_user
 from app.observability import record_job_event
 from app.schemas import ProcessingJobResponse
 from app.services.audit_service import audit_service
@@ -70,9 +70,9 @@ async def get_processing_job(
 async def retry_processing_job(
     job_id: UUID,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_admin_user),
+    current_user: User = Depends(get_super_admin_user),
 ):
-    """Admin-only: requeue a failed or dead-lettered job."""
+    """Super-admin-only: requeue a failed or dead-lettered job."""
     job = get_current_org_job(job_id, current_user, db)
     if job.status not in {"failed", "dead_lettered"}:
         raise HTTPException(status_code=409, detail="Only failed or dead-lettered jobs can be retried")

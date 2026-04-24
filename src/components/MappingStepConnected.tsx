@@ -21,7 +21,8 @@ export default function MappingStep() {
     error,
     setError,
   } = useReconciliationStore();
-  const isAdmin = currentUser?.role === "admin";
+  const isAdmin =
+    currentUser?.role === "admin" || currentUser?.role === "super_admin";
 
   const [confirmed, setConfirmed] = useState(false);
   const [previewRows, setPreviewRows] = useState<Record<string, any>[]>([]);
@@ -531,7 +532,7 @@ export default function MappingStep() {
           </h2>
           <p className="mt-3 text-sm leading-6 text-slate-600">
             Mapping and standardization change the uploaded source data, so they are reserved for admins.
-            Reviewers can still open history, inspect reconciliation workspaces, approve or reject matches, and download reports.
+            Reviewers can still open history, inspect reconciliation workspaces, and download reports.
           </p>
           <button
             onClick={() => setStep("workspace")}

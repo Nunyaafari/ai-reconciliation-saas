@@ -655,7 +655,7 @@ class CreateUserRequest(BaseModel):
     name: str
     email: str
     password: str = Field(min_length=8)
-    role: str = Field(pattern="^(admin|reviewer)$")
+    role: str = Field(pattern="^(super_admin|admin|reviewer)$")
 
 
 class ChangePasswordRequest(BaseModel):

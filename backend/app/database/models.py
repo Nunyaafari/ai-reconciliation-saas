@@ -69,7 +69,7 @@ class User(Base):
     email = Column(String(255), nullable=False, unique=True)
     name = Column(String(255), nullable=False)
     password_hash = Column(String(255), nullable=False)
-    role = Column(String(50), default="user")  # admin, user
+    role = Column(String(50), default="reviewer")  # super_admin, admin, reviewer
     is_active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 

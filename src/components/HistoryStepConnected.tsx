@@ -31,7 +31,8 @@ export default function HistoryStep() {
   } = useReconciliationStore();
   const [workingSessionId, setWorkingSessionId] = useState<string | null>(null);
   const [downloadingSessionId, setDownloadingSessionId] = useState<string | null>(null);
-  const isAdmin = currentUser?.role === "admin";
+  const isAdmin =
+    currentUser?.role === "admin" || currentUser?.role === "super_admin";
 
   useEffect(() => {
     loadReconciliationHistory().catch((error) => {

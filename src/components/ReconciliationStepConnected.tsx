@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -707,7 +707,9 @@ export default function ReconciliationStep() {
   const [showCloseMonthConfirm, setShowCloseMonthConfirm] = useState(false);
   const [closingMonth, setClosingMonth] = useState(false);
   const [syncScrollEnabled, setSyncScrollEnabled] = useState(false);
-  const isAdmin = currentUser?.role === "admin";
+  const syncScrollSessionInitRef = useRef<string | null>(null);
+  const isAdmin =
+    currentUser?.role === "admin" || currentUser?.role === "super_admin";
   const isSessionClosed = reconciliationSession?.status === "closed";
   const canEditSession = Boolean(isAdmin && !isSessionClosed);
 
@@ -816,6 +818,8 @@ export default function ReconciliationStep() {
   useEffect(() => {
     setAttemptedThresholds([]);
     setSelectedBankTx(null);
+    setSyncScrollEnabled(false);
+    syncScrollSessionInitRef.current = null;
     setManualSelections({
       topBankCreditIds: [],
       topBookDebitIds: [],
@@ -827,6 +831,8 @@ export default function ReconciliationStep() {
   useEffect(() => {
     setAttemptedThresholds([]);
     setSelectedBankTx(null);
+    setSyncScrollEnabled(false);
+    syncScrollSessionInitRef.current = null;
     setManualSelections({
       topBankCreditIds: [],
       topBookDebitIds: [],
@@ -834,6 +840,35 @@ export default function ReconciliationStep() {
       bottomBankDebitIds: [],
     });
   }, [bankSessionId, bookSessionId]);
+
+  useEffect(() => {
+    const sessionId = reconciliationSession?.id ?? null;
+    if (!sessionId) return;
+
+    const hasLoadedTransactions =
+      bankTransactions.length > 0 || bookTransactions.length > 0;
+    if (!hasLoadedTransactions) return;
+
+    if (syncScrollSessionInitRef.current === sessionId) {
+      return;
+    }
+
+    const hasCarryforwardRows =
+      bankTransactions.some((transaction) => transaction.isCarryforward) ||
+      bookTransactions.some((transaction) => transaction.isCarryforward);
+    const hasCarryforwardBalances =
+      Math.abs(Number(reconciliationSession?.bankOpenBalance || 0)) > 0.009 ||
+      Math.abs(Number(reconciliationSession?.bookOpenBalance || 0)) > 0.009;
+
+    setSyncScrollEnabled(hasCarryforwardRows || hasCarryforwardBalances);
+    syncScrollSessionInitRef.current = sessionId;
+  }, [
+    reconciliationSession?.id,
+    reconciliationSession?.bankOpenBalance,
+    reconciliationSession?.bookOpenBalance,
+    bankTransactions,
+    bookTransactions,
+  ]);
 
   const bankById = useMemo(
     () => new Map(bankTransactions.map((transaction) => [transaction.id, transaction])),
