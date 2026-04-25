@@ -515,6 +515,18 @@ class ApiClient {
     return this.request(`/api/reconciliation/sessions/${orgId}`);
   }
 
+  async updateReconciliationAccount(payload: {
+    current_account_name: string;
+    current_account_number?: string | null;
+    account_name: string;
+    account_number?: string | null;
+  }): Promise<ApiResponse<any>> {
+    return this.request(`/api/reconciliation/accounts`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+  }
+
   async getReconciliationWorksheet(
     sessionId: string
   ): Promise<ApiResponse<any>> {

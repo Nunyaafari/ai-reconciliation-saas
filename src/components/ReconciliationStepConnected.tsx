@@ -626,6 +626,7 @@ export default function ReconciliationStep() {
     saveReconciliationSession,
     createMatch,
     approveMatchesBulk,
+    rejectMatchesBulk,
     closeReconciliationSession,
     setStep,
     bankSessionId,
@@ -918,6 +919,14 @@ export default function ReconciliationStep() {
       ),
     };
   }, [expandedMatchGroups]);
+
+  const pendingMatchGroupIds = useMemo(
+    () =>
+      matchGroups
+        .filter((group) => group.status === "pending")
+        .map((group) => group.id),
+    [matchGroups]
+  );
 
   const exactPendingSelections = useMemo(
     () => ({
@@ -1652,6 +1661,51 @@ export default function ReconciliationStep() {
     }
   };
 
+  const handleClearMatches = async () => {
+    if (!canEditSession) {
+      setStatusMessage({
+        tone: "info",
+        text: "This month is closed. Matches are read-only.",
+      });
+      return;
+    }
+
+    if (pendingMatchGroupIds.length === 0) {
+      setStatusMessage({
+        tone: "info",
+        text: "No staged matches to clear.",
+      });
+      return;
+    }
+
+    setStatusMessage({
+      tone: "info",
+      text: "Clearing staged matches...",
+    });
+
+    try {
+      await rejectMatchesBulk(pendingMatchGroupIds);
+      setSelectedMatchGroups({
+        cashCreditBankDebit: [],
+        cashDebitBankCredit: [],
+      });
+      setSelectedBankTx(null);
+      await loadAuditEntries();
+      setStatusMessage({
+        tone: "success",
+        text: `Cleared ${pendingMatchGroupIds.length} staged match${
+          pendingMatchGroupIds.length === 1 ? "" : "es"
+        }.`,
+      });
+    } catch (error) {
+      console.error("Failed to clear staged matches:", error);
+      setStatusMessage({
+        tone: "error",
+        text: "Failed to clear staged matches.",
+      });
+    }
+  };
+
   const handleRemoveSelectedMatches = async (lane: MatchLaneKey) => {
     const selectedIds = selectedMatchGroups[lane];
     if (!selectedIds.length || removingLane === lane) return;
@@ -2243,6 +2297,19 @@ export default function ReconciliationStep() {
               >
                 <Link2 className="h-4 w-4" />
                 Sync Scroll
+              </button>
+              <button
+                onClick={handleClearMatches}
+                disabled={!canEditSession || loading || pendingMatchGroupIds.length === 0}
+                className={`inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium ${
+                  !canEditSession || loading || pendingMatchGroupIds.length === 0
+                    ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400"
+                    : "border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
+                }`}
+                title="Remove staged matches so you can manually check items"
+              >
+                <Trash2 className="h-4 w-4" />
+                Clear Matches
               </button>
               <button
                 onClick={() => setShowManualEntry(true)}

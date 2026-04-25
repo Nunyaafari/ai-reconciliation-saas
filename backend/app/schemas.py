@@ -420,6 +420,15 @@ class ReconciliationBalanceUpdateRequest(BaseModel):
     currency_code: Optional[str] = None
 
 
+class ReconciliationAccountUpdateRequest(BaseModel):
+    """Rename account identity across its monthly reconciliation history."""
+
+    current_account_name: str
+    current_account_number: Optional[str] = None
+    account_name: str
+    account_number: Optional[str] = None
+
+
 class TransactionRemovalUpdateRequest(BaseModel):
     """Bulk toggle whether outstanding transactions are excluded from carryforward."""
 

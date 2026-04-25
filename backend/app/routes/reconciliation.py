@@ -28,6 +28,7 @@ from app.schemas import (
     MatchGroupApprove,
     MatchGroupBulkApproveResponse,
     ReconciliationBalanceUpdateRequest,
+    ReconciliationAccountUpdateRequest,
     ReconciliationSessionResponse,
     TransactionRemovalUpdateRequest,
     ManualTransactionCreate,
@@ -469,7 +470,17 @@ async def reject_match(
     current_user: User = Depends(get_admin_user),
 ):
     """Reject/delete a match."""
-    match_group = get_match_group_or_404(match_id, db, current_user)
+    match_group = (
+        db.query(MatchGroup)
+        .filter(
+            MatchGroup.id == match_id,
+            MatchGroup.org_id == current_user.org_id,
+        )
+        .first()
+    )
+    if not match_group:
+        logger.info("Reject requested for missing match %s; treated as no-op", match_id)
+        return {"status": "success", "match_id": str(match_id), "already_cleared": True}
 
     bank_txs = db.query(BankTransaction).filter(
         BankTransaction.match_group_id == match_id,
@@ -816,6 +827,82 @@ async def list_reconciliation_sessions(
         ReconciliationSessionResponse.model_validate(reconciliation_session)
         for reconciliation_session in sessions
     ]
+
+
+@router.patch("/accounts")
+async def update_reconciliation_account(
+    payload: ReconciliationAccountUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_admin_user),
+):
+    """Update account name/number across all months for a workspace account."""
+    current_name = (payload.current_account_name or "").strip()
+    next_name = (payload.account_name or "").strip()
+    if not current_name or not next_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Current account name and new account name are required.",
+        )
+
+    current_number = (payload.current_account_number or "").strip() or None
+    next_number = (payload.account_number or "").strip() or None
+
+    query = db.query(ReconciliationSession).filter(
+        ReconciliationSession.org_id == current_user.org_id,
+        ReconciliationSession.account_name == current_name,
+    )
+    if current_number is None:
+        query = query.filter(
+            or_(
+                ReconciliationSession.account_number.is_(None),
+                ReconciliationSession.account_number == "",
+            )
+        )
+    else:
+        query = query.filter(ReconciliationSession.account_number == current_number)
+
+    sessions = query.all()
+    if not sessions:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    upload_session_ids: set[UUID] = set()
+    for session in sessions:
+        session.account_name = next_name
+        session.account_number = next_number
+        session.updated_at = datetime.utcnow()
+        if session.bank_upload_session_id:
+            upload_session_ids.add(session.bank_upload_session_id)
+        if session.book_upload_session_id:
+            upload_session_ids.add(session.book_upload_session_id)
+
+    if upload_session_ids:
+        db.query(UploadSession).filter(
+            UploadSession.org_id == current_user.org_id,
+            UploadSession.id.in_(list(upload_session_ids)),
+        ).update({"account_name": next_name}, synchronize_session=False)
+
+    db.commit()
+
+    audit_service.log(
+        db=db,
+        org_id=current_user.org_id,
+        actor_user_id=current_user.id,
+        action="reconciliation_account.updated",
+        entity_type="reconciliation_account",
+        entity_id=f"{current_name}::{current_number or ''}",
+        metadata={
+            "current_account_name": current_name,
+            "current_account_number": current_number,
+            "account_name": next_name,
+            "account_number": next_number,
+            "updated_session_count": len(sessions),
+        },
+    )
+
+    return {
+        "status": "success",
+        "updated_session_count": len(sessions),
+    }
 
 
 @router.post(

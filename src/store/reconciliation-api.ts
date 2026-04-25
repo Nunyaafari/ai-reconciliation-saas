@@ -2344,7 +2344,13 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
       const response = await apiClient.rejectMatch(groupId);
 
       if (!response.success) {
-        throw new Error(response.error || "Rejection failed");
+        const errorText = String(response.error || "").toLowerCase();
+        const notFound =
+          response.status === 404 || errorText.includes("not found");
+
+        if (!notFound) {
+          throw new Error(response.error || "Rejection failed");
+        }
       }
 
       const groupBefore = get().matchGroups.find((g) => g.id === groupId);
@@ -2433,7 +2439,43 @@ export const useReconciliationStore = create<ReconciliationStore>((set, get) => 
 
   rejectMatchesBulk: async (groupIds: string[]) => {
     if (groupIds.length === 0) return;
-    await Promise.all(groupIds.map((id) => get().rejectMatch(id)));
+
+    set({ loading: true, error: null });
+
+    try {
+      const uniqueIds = Array.from(new Set(groupIds));
+      const unexpectedErrors: string[] = [];
+
+      for (const groupId of uniqueIds) {
+        const response = await apiClient.rejectMatch(groupId);
+        if (response.success) continue;
+
+        const errorText = String(response.error || "").toLowerCase();
+        const notFound =
+          response.status === 404 || errorText.includes("not found");
+
+        // Stale IDs can happen after concurrent refresh/remove actions.
+        // Treat them as already-cleared so bulk clear remains reliable.
+        if (notFound) {
+          continue;
+        }
+
+        unexpectedErrors.push(response.error || "Failed to clear a match");
+      }
+
+      await get().refreshReconciliation();
+
+      if (unexpectedErrors.length > 0) {
+        throw new Error(unexpectedErrors[0]);
+      }
+    } catch (error) {
+      const errorMsg =
+        error instanceof Error ? error.message : "Failed to clear matches";
+      set({ error: errorMsg, loading: false });
+      throw error;
+    } finally {
+      set({ loading: false });
+    }
   },
 
   closeReconciliationSession: async () => {

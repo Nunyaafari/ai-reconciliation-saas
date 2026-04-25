@@ -538,7 +538,7 @@ export default function SettingsStep() {
           </div>
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-[0.95fr_1.05fr]">
+        <div className="space-y-6">
           <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="flex items-center justify-between gap-3">
               <div>
@@ -607,55 +607,6 @@ export default function SettingsStep() {
             </div>
           </div>
 
-          <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Audit Trail
-                </p>
-                <h2 className="text-xl font-semibold text-slate-900">
-                  Recent user actions
-                </h2>
-                <p className="mt-1 text-sm text-slate-600">
-                  Track who changed passwords, created users, queued jobs, or took reconciliation actions.
-                </p>
-              </div>
-              <button
-                onClick={() => loadAuditLogs()}
-                className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-              >
-                <RefreshCw className="h-4 w-4" />
-                Refresh audit
-              </button>
-            </div>
-
-            <div className="mt-5 space-y-3">
-              {auditLoading ? (
-                <EmptyStateCard message="Loading audit trail..." />
-              ) : auditEntries.length === 0 ? (
-                <EmptyStateCard message="No audit events recorded yet." dashed />
-              ) : (
-                auditEntries.map((entry) => (
-                  <div
-                    key={entry.id}
-                    className="flex flex-wrap items-start justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
-                  >
-                    <div>
-                      <p className="text-sm font-semibold text-slate-900">
-                        {formatAuditAction(entry.action)}
-                      </p>
-                      <p className="mt-1 text-xs text-slate-500">
-                        {entry.actorName || entry.actorEmail || "System"} • {entry.entityType}
-                      </p>
-                    </div>
-                    <p className="text-xs text-slate-400">
-                      {formatTimestamp(entry.createdAt)}
-                    </p>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
         </div>
 
         {isSuperAdmin ? (
@@ -663,10 +614,10 @@ export default function SettingsStep() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Team Access
+                    Team Workspace
                   </p>
                   <h2 className="text-xl font-semibold text-slate-900">
-                    Super admins, admins, and reviewers
+                    Team users and roles
                   </h2>
                   <p className="mt-1 text-sm text-slate-600">
                     Super admins can manage users and retry failed jobs. Admins can upload, run reconciliation, and close months. Reviewers can inspect workspaces in read-only mode and download reports.
@@ -784,6 +735,56 @@ export default function SettingsStep() {
               </div>
             </div>
         ) : null}
+
+        <div className="mt-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Audit Trail
+              </p>
+              <h2 className="text-xl font-semibold text-slate-900">
+                Recent user actions
+              </h2>
+              <p className="mt-1 text-sm text-slate-600">
+                Track who changed passwords, created users, queued jobs, or took reconciliation actions.
+              </p>
+            </div>
+            <button
+              onClick={() => loadAuditLogs()}
+              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+            >
+              <RefreshCw className="h-4 w-4" />
+              Refresh audit
+            </button>
+          </div>
+
+          <div className="mt-5 space-y-3">
+            {auditLoading ? (
+              <EmptyStateCard message="Loading audit trail..." />
+            ) : auditEntries.length === 0 ? (
+              <EmptyStateCard message="No audit events recorded yet." dashed />
+            ) : (
+              auditEntries.map((entry) => (
+                <div
+                  key={entry.id}
+                  className="flex flex-wrap items-start justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
+                >
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">
+                      {formatAuditAction(entry.action)}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      {entry.actorName || entry.actorEmail || "System"} • {entry.entityType}
+                    </p>
+                  </div>
+                  <p className="text-xs text-slate-400">
+                    {formatTimestamp(entry.createdAt)}
+                  </p>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
 
         {isAdmin ? (
             <div className="mt-6 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">

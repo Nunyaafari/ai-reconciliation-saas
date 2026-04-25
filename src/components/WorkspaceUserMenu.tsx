@@ -41,7 +41,7 @@ export default function WorkspaceUserMenu() {
 
   return (
     <header className="sticky top-0 z-[60] border-b border-slate-200 bg-white/95 backdrop-blur supports-[backdrop-filter]:bg-white/80">
-      <div className="flex w-full items-center justify-between gap-3 px-3 py-3 sm:px-4">
+      <div className="flex w-full items-center justify-between gap-2 px-3 py-2 sm:px-4">
         <div className="flex min-w-0 items-center gap-4">
           <button
             type="button"
@@ -56,7 +56,7 @@ export default function WorkspaceUserMenu() {
           <button
             type="button"
             onClick={() => setOpen((value) => !value)}
-            className="inline-flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
+            className="inline-flex items-center gap-2.5 rounded-2xl border border-slate-200 bg-white px-3 py-1.5 shadow-sm transition hover:border-slate-300 hover:bg-slate-50"
           >
             <div className="inline-flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-900 text-sm font-semibold text-white">
               {initials}

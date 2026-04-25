@@ -8,6 +8,7 @@ import {
   FileDown,
   FolderKanban,
   FolderOpen,
+  Pencil,
   PlusCircle,
   RefreshCw,
 } from "lucide-react";
@@ -204,6 +205,15 @@ export default function WorkspaceStep() {
     useState<WorkspaceAccountGroup | null>(null);
   const [blankPeriodMonth, setBlankPeriodMonth] = useState("");
   const [creatingBlankPeriod, setCreatingBlankPeriod] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<WorkspaceAccountGroup | null>(
+    null
+  );
+  const [editAccountName, setEditAccountName] = useState("");
+  const [editAccountNumber, setEditAccountNumber] = useState("");
+  const [savingAccountEdit, setSavingAccountEdit] = useState(false);
+
+  const canManageAccounts =
+    currentUser?.role === "admin" || currentUser?.role === "super_admin";
 
   const workspaceAccounts = useMemo<WorkspaceAccountGroup[]>(() => {
     const grouped = new Map<string, WorkspaceAccountGroup>();
@@ -288,6 +298,47 @@ export default function WorkspaceStep() {
         `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}`
     );
     setShowBlankPeriodModal(true);
+  };
+
+  const handleOpenAccountEdit = (account: WorkspaceAccountGroup) => {
+    setEditingAccount(account);
+    setEditAccountName(account.accountName);
+    setEditAccountNumber(account.accountNumber || "");
+  };
+
+  const handleSaveAccountEdit = async () => {
+    if (!editingAccount) return;
+    const nextName = editAccountName.trim();
+    if (!nextName) {
+      setError("Account name is required.");
+      return;
+    }
+
+    try {
+      setSavingAccountEdit(true);
+      setError(null);
+      const response = await apiClient.updateReconciliationAccount({
+        current_account_name: editingAccount.accountName,
+        current_account_number: editingAccount.accountNumber || undefined,
+        account_name: nextName,
+        account_number: editAccountNumber.trim() || undefined,
+      });
+
+      if (!response.success) {
+        throw new Error(response.error || "Failed to update account.");
+      }
+
+      const nextKey = `${nextName}::${editAccountNumber.trim()}`;
+      setEditingAccount(null);
+      await loadReconciliationHistory();
+      setSelectedWorkspaceAccountKey(nextKey);
+    } catch (error) {
+      setError(
+        error instanceof Error ? error.message : "Failed to update account."
+      );
+    } finally {
+      setSavingAccountEdit(false);
+    }
   };
 
   const handleCreateBlankPeriod = async () => {
@@ -476,6 +527,66 @@ export default function WorkspaceStep() {
                   }`}
                 >
                   {creatingBlankPeriod ? "Opening..." : "Open Blank Period"}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {editingAccount ? (
+          <div className="fixed inset-0 z-[82] flex items-center justify-center bg-slate-900/40 px-4">
+            <div className="w-full max-w-lg rounded-3xl border border-slate-200 bg-white p-6 shadow-xl">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
+                Edit Account
+              </p>
+              <h2 className="mt-2 text-xl font-semibold text-slate-900">
+                Update account identity
+              </h2>
+              <p className="mt-2 text-sm text-slate-600">
+                This updates the selected account name and account number across
+                all months under this account.
+              </p>
+
+              <div className="mt-5 grid gap-4">
+                <label className="grid gap-2 text-sm font-medium text-slate-700">
+                  Account Name
+                  <input
+                    type="text"
+                    value={editAccountName}
+                    onChange={(event) => setEditAccountName(event.target.value)}
+                    className="rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700"
+                  />
+                </label>
+                <label className="grid gap-2 text-sm font-medium text-slate-700">
+                  Account Number
+                  <input
+                    type="text"
+                    value={editAccountNumber}
+                    onChange={(event) => setEditAccountNumber(event.target.value)}
+                    placeholder="Optional"
+                    className="rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-700"
+                  />
+                </label>
+              </div>
+
+              <div className="mt-6 flex items-center justify-end gap-2">
+                <button
+                  onClick={() => setEditingAccount(null)}
+                  disabled={savingAccountEdit}
+                  className="rounded-full border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveAccountEdit}
+                  disabled={savingAccountEdit}
+                  className={`rounded-full px-4 py-2 text-xs font-semibold ${
+                    savingAccountEdit
+                      ? "cursor-not-allowed bg-slate-300 text-slate-600"
+                      : "bg-slate-900 text-white hover:bg-slate-800"
+                  }`}
+                >
+                  {savingAccountEdit ? "Saving..." : "Save Account"}
                 </button>
               </div>
             </div>
@@ -708,8 +819,25 @@ export default function WorkspaceStep() {
                         </p>
                       </div>
                       <button
+                        onClick={() => handleOpenAccountEdit(selectedWorkspaceAccount)}
+                        disabled={!canManageAccounts}
+                        className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold shadow-sm ${
+                          canManageAccounts
+                            ? "bg-white text-slate-700 hover:bg-slate-100"
+                            : "cursor-not-allowed bg-slate-200 text-slate-500"
+                        }`}
+                      >
+                        <Pencil className="h-4 w-4" />
+                        Edit Account
+                      </button>
+                      <button
                         onClick={() => handleOpenBlankPeriod(selectedWorkspaceAccount)}
-                        className="inline-flex items-center gap-2 rounded-xl bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-100"
+                        disabled={!canManageAccounts}
+                        className={`inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold shadow-sm ${
+                          canManageAccounts
+                            ? "bg-white text-slate-700 hover:bg-slate-100"
+                            : "cursor-not-allowed bg-slate-200 text-slate-500"
+                        }`}
                       >
                         <PlusCircle className="h-4 w-4" />
                         New Month
